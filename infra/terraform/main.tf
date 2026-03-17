@@ -11,7 +11,6 @@ terraform {
 provider "google" {
   project = var.project_id
   region  = var.region
-  zone    = var.zone
 }
 
 # -------------------------------------------------------
@@ -19,8 +18,9 @@ provider "google" {
 # -------------------------------------------------------
 resource "google_project_service" "apis" {
   for_each = toset([
-    "compute.googleapis.com",
-    "artifactregistry.googleapis.com",
+    "container.googleapis.com",          # GKE
+    "artifactregistry.googleapis.com",   # Artifact Registry
+    "compute.googleapis.com",            # Necessário pelo GKE
   ])
   service            = each.key
   disable_on_destroy = false
@@ -38,59 +38,21 @@ resource "google_artifact_registry_repository" "docker_repo" {
 }
 
 # -------------------------------------------------------
-# Firewall — abre portas da aplicação
+# GKE Autopilot Cluster
+# Autopilot: Google gerencia os nodes automaticamente,
+# cobra por pod (não por node), escala sem configuração.
 # -------------------------------------------------------
-resource "google_compute_firewall" "allow_app" {
-  name    = "devops-challenge-allow-app"
-  network = "default"
+resource "google_container_cluster" "gke" {
+  name     = var.cluster_name
+  location = var.region  # Regional = alta disponibilidade
 
-  allow {
-    protocol = "tcp"
-    ports    = ["22", "80", "3000", "9090"]
+  enable_autopilot    = true
+  deletion_protection = false
+
+  # Versão do Kubernetes gerenciada pelo GKE (release channel)
+  release_channel {
+    channel = "REGULAR"
   }
 
-  source_ranges = ["0.0.0.0/0"]
-  target_tags   = ["devops-challenge"]
-  depends_on    = [google_project_service.apis]
-}
-
-# -------------------------------------------------------
-# GCE VM — roda o Docker Compose
-# -------------------------------------------------------
-resource "google_compute_instance" "app_vm" {
-  name         = "devops-challenge-vm"
-  machine_type = var.machine_type
-  zone         = var.zone
-  tags         = ["devops-challenge"]
-
-  boot_disk {
-    initialize_params {
-      image = "debian-cloud/debian-12"
-      size  = 30
-      type  = "pd-balanced"
-    }
-  }
-
-  network_interface {
-    network = "default"
-    access_config {} # IP externo efêmero
-  }
-
-  # Variáveis passadas ao startup script via metadata
-  metadata = {
-    region     = var.region
-    repo_name  = var.repo_name
-    repo_url   = var.repo_url
-    startup-script = file("${path.module}/../scripts/startup.sh")
-  }
-
-  # Service Account com acesso ao Artifact Registry
-  service_account {
-    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
-  }
-
-  depends_on = [
-    google_project_service.apis,
-    google_artifact_registry_repository.docker_repo,
-  ]
+  depends_on = [google_project_service.apis]
 }

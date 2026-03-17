@@ -2,7 +2,7 @@
 
 const express = require('express');
 const app = express();
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', app: 'app2' });
@@ -24,6 +24,11 @@ app.get('/time', (_req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`App 2 listening on port ${PORT}`);
-});
+// Só inicia o servidor se executado diretamente (não em testes)
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`App 2 listening on port ${PORT}`);
+  });
+}
+
+module.exports = app;

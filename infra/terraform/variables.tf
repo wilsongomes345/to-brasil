@@ -4,31 +4,19 @@ variable "project_id" {
 }
 
 variable "region" {
-  description = "Região GCP"
+  description = "Região GCP (Autopilot é regional — alta disponibilidade)"
   type        = string
   default     = "us-central1"
 }
 
-variable "zone" {
-  description = "Zona GCP"
+variable "cluster_name" {
+  description = "Nome do cluster GKE"
   type        = string
-  default     = "us-central1-a"
-}
-
-variable "machine_type" {
-  description = "Tipo de máquina GCE"
-  type        = string
-  default     = "e2-medium" # 2 vCPU / 4 GB RAM
+  default     = "devops-challenge-cluster"
 }
 
 variable "repo_name" {
   description = "Nome do repositório no Artifact Registry"
   type        = string
   default     = "devops-challenge"
-}
-
-variable "repo_url" {
-  description = "URL do repositório Git da aplicação"
-  type        = string
-  default     = "https://github.com/wilsongomes345/to-brasil.git"
 }

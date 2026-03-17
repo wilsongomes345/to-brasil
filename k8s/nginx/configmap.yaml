@@ -1,0 +1,118 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: devops-challenge
+data:
+  nginx.conf: |
+    worker_processes auto;
+    error_log /var/log/nginx/error.log warn;
+    pid /var/run/nginx.pid;
+
+    events {
+        worker_connections 1024;
+    }
+
+    http {
+        include       /etc/nginx/mime.types;
+        default_type  application/octet-stream;
+
+        log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                        '$status $body_bytes_sent '
+                        'cache=$upstream_cache_status '
+                        'rt=$upstream_response_time';
+
+        access_log /var/log/nginx/access.log main;
+
+        sendfile on;
+        keepalive_timeout 65;
+
+        # -------------------------------------------------------
+        # Cache zone para App 1 — TTL: 10 segundos
+        # -------------------------------------------------------
+        proxy_cache_path /var/cache/nginx/app1
+            levels=1:2
+            keys_zone=app1_cache:10m
+            max_size=100m
+            inactive=30s
+            use_temp_path=off;
+
+        # -------------------------------------------------------
+        # Cache zone para App 2 — TTL: 1 minuto
+        # -------------------------------------------------------
+        proxy_cache_path /var/cache/nginx/app2
+            levels=1:2
+            keys_zone=app2_cache:10m
+            max_size=100m
+            inactive=5m
+            use_temp_path=off;
+
+        # Kubernetes: resolve pelo DNS interno do cluster
+        upstream app1 {
+            server app1:8000;
+        }
+
+        upstream app2 {
+            server app2:3001;
+        }
+
+        server {
+            listen 80;
+            server_name localhost;
+
+            location /health {
+                return 200 '{"status":"ok","service":"nginx"}';
+                add_header Content-Type application/json;
+            }
+
+            location /nginx_status {
+                stub_status on;
+                allow 127.0.0.1;
+                allow 10.0.0.0/8;
+                allow 172.16.0.0/12;
+                deny all;
+            }
+
+            # --------------------------------------------------
+            # App 1 — Python FastAPI — cache: 10 segundos
+            # --------------------------------------------------
+            location /app1/ {
+                proxy_pass         http://app1/;
+                proxy_cache        app1_cache;
+                proxy_cache_valid  200 10s;
+                proxy_cache_valid  404 1s;
+                proxy_cache_key    "$scheme$request_method$host$request_uri";
+                proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+                proxy_cache_lock   on;
+
+                proxy_set_header   Host              $host;
+                proxy_set_header   X-Real-IP         $remote_addr;
+                proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+
+                add_header         X-Cache-Status    $upstream_cache_status;
+                add_header         X-Cache-TTL       "10s";
+                add_header         X-App             "app1";
+            }
+
+            # --------------------------------------------------
+            # App 2 — Node.js Express — cache: 1 minuto
+            # --------------------------------------------------
+            location /app2/ {
+                proxy_pass         http://app2/;
+                proxy_cache        app2_cache;
+                proxy_cache_valid  200 60s;
+                proxy_cache_valid  404 1s;
+                proxy_cache_key    "$scheme$request_method$host$request_uri";
+                proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+                proxy_cache_lock   on;
+
+                proxy_set_header   Host              $host;
+                proxy_set_header   X-Real-IP         $remote_addr;
+                proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+
+                add_header         X-Cache-Status    $upstream_cache_status;
+                add_header         X-Cache-TTL       "60s";
+                add_header         X-App             "app2";
+            }
+        }
+    }

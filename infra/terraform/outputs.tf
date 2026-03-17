@@ -1,6 +1,11 @@
-output "vm_external_ip" {
-  description = "IP externo da VM"
-  value       = google_compute_instance.app_vm.network_interface[0].access_config[0].nat_ip
+output "cluster_name" {
+  description = "Nome do cluster GKE"
+  value       = google_container_cluster.gke.name
+}
+
+output "cluster_location" {
+  description = "Região do cluster GKE"
+  value       = google_container_cluster.gke.location
 }
 
 output "artifact_registry_url" {
@@ -8,37 +13,12 @@ output "artifact_registry_url" {
   value       = "${var.region}-docker.pkg.dev/${var.project_id}/${var.repo_name}"
 }
 
-output "app1_text_url" {
-  description = "App 1 — rota texto"
-  value       = "http://${google_compute_instance.app_vm.network_interface[0].access_config[0].nat_ip}/app1/text"
+output "kubectl_command" {
+  description = "Comando para configurar kubectl"
+  value       = "gcloud container clusters get-credentials ${var.cluster_name} --region ${var.region} --project ${var.project_id}"
 }
 
-output "app1_time_url" {
-  description = "App 1 — rota horário"
-  value       = "http://${google_compute_instance.app_vm.network_interface[0].access_config[0].nat_ip}/app1/time"
-}
-
-output "app2_text_url" {
-  description = "App 2 — rota texto"
-  value       = "http://${google_compute_instance.app_vm.network_interface[0].access_config[0].nat_ip}/app2/text"
-}
-
-output "app2_time_url" {
-  description = "App 2 — rota horário"
-  value       = "http://${google_compute_instance.app_vm.network_interface[0].access_config[0].nat_ip}/app2/time"
-}
-
-output "grafana_url" {
-  description = "Grafana"
-  value       = "http://${google_compute_instance.app_vm.network_interface[0].access_config[0].nat_ip}:3000"
-}
-
-output "prometheus_url" {
-  description = "Prometheus"
-  value       = "http://${google_compute_instance.app_vm.network_interface[0].access_config[0].nat_ip}:9090"
-}
-
-output "ssh_command" {
-  description = "Comando SSH para acessar a VM"
-  value       = "gcloud compute ssh devops-challenge-vm --zone=${var.zone}"
+output "registry_auth_command" {
+  description = "Comando para autenticar Docker no Artifact Registry"
+  value       = "gcloud auth configure-docker ${var.region}-docker.pkg.dev"
 }

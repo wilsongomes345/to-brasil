@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  namespace: devops-challenge
+  labels:
+    app: nginx
+  annotations:
+    # Reserva IP externo estático (opcional — remover para IP efêmero)
+    # cloud.google.com/load-balancer-type: "External"
+spec:
+  selector:
+    app: nginx
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+  type: LoadBalancer  # GCP provisiona um Cloud Load Balancer automaticamente

@@ -3,7 +3,5 @@
 
 project_id   = "SEU_PROJECT_ID_AQUI"
 region       = "us-central1"
-zone         = "us-central1-a"
-machine_type = "e2-medium"
+cluster_name = "devops-challenge-cluster"
 repo_name    = "devops-challenge"
-repo_url     = "https://github.com/wilsongomes345/to-brasil.git"

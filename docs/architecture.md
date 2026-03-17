@@ -1,210 +1,185 @@
-# Arquitetura — Desafio DevOps 2025
+# Arquitetura da Infraestrutura
+
+## Visão Geral
+
+A infraestrutura roda no **Google Kubernetes Engine (GKE Autopilot)** na região `us-central1`.
+O Nginx atua como reverse proxy e camada de cache, exposto via **Cloud Load Balancer**.
+As imagens são armazenadas no **Artifact Registry** e o deploy é automatizado via **GitHub Actions**.
 
 ---
 
-## 1. Visão Geral dos Componentes
-
-| Componente        | Tecnologia                       | Porta (externa) |
-|-------------------|----------------------------------|-----------------|
-| App 1             | Python 3.12 / FastAPI            | — (interno)     |
-| App 2             | Node.js 20 / Express             | — (interno)     |
-| Reverse Proxy     | Nginx (+ Proxy Cache)            | **80**          |
-| Nginx Exporter    | nginx-prometheus-exporter        | — (interno)     |
-| Métricas          | Prometheus                       | **9090**        |
-| Dashboards        | Grafana                          | **3000**        |
-
----
-
-## 2. Diagrama Local (Docker Compose)
+## Diagrama — Arquitetura GKE
 
 ```mermaid
 graph TB
-    Client["🌐 Cliente"]
-
-    subgraph proxy["Camada de Entrada"]
-        Nginx["⚙️ Nginx\nReverse Proxy + Cache\n:80"]
+    subgraph Internet
+        DEV["Dev — Git Push"]
+        CLIENT["Cliente — HTTP"]
     end
 
-    subgraph apps["Camada de Aplicação  (rede: backend)"]
-        App1["🐍 App 1\nPython / FastAPI\nCache: 10s"]
-        App2["🟢 App 2\nNode.js / Express\nCache: 60s"]
-    end
-
-    subgraph obs["Observabilidade  (rede: monitoring)"]
-        NginxExp["📡 Nginx Exporter"]
-        Prometheus["📈 Prometheus\n:9090"]
-        Grafana["📊 Grafana\n:3000"]
-    end
-
-    Client -->|"HTTP :80"| Nginx
-    Nginx -->|"HIT / MISS  /app1/*"| App1
-    Nginx -->|"HIT / MISS  /app2/*"| App2
-    Nginx -->|"/nginx_status"| NginxExp
-    NginxExp -->|"scrape :9113"| Prometheus
-    Prometheus -->|"datasource"| Grafana
-```
-
----
-
-## 3. Diagrama de Produção (GCP)
-
-```mermaid
-graph TB
-    Internet["🌐 Internet"]
-    Dev["👨‍💻 Developer\ngit push"]
-
-    subgraph GCP["☁️ Google Cloud Platform"]
-
-        subgraph CICD["GitHub Actions (CI/CD)"]
-            Test["✅ Testes"]
-            Build["🔨 Build Images"]
-            PushImg["📤 Push :latest + :sha"]
+    subgraph GCP["Google Cloud Platform"]
+        subgraph AR["Artifact Registry"]
+            IMG1["app1:sha"]
+            IMG2["app2:sha"]
         end
 
-        AR["🗄️ Artifact Registry\nus-central1-docker.pkg.dev\n└── /app1\n└── /app2"]
+        subgraph GKE["GKE Autopilot Cluster — us-central1"]
+            subgraph NS["Namespace: devops-challenge"]
+                LB["Cloud Load Balancer — IP Externo :80"]
 
-        FW["🔒 Firewall\n:80  :3000  :9090  :22"]
+                subgraph NGINX["nginx Deployment — 1 pod"]
+                    NP["Nginx Reverse Proxy + Cache"]
+                end
 
-        subgraph VM["🖥️ GCE VM — e2-medium"]
-            subgraph DC["Docker Compose (prod)"]
-                NginxP["⚙️ Nginx\n:80"]
-                App1P["🐍 App 1\nFastAPI"]
-                App2P["🟢 App 2\nExpress"]
-                PromP["📈 Prometheus\n:9090"]
-                GrafP["📊 Grafana\n:3000"]
+                subgraph APP1["app1 Deployment — 2 pods + HPA 2-5"]
+                    A1A["Python FastAPI :8000"]
+                    A1B["Python FastAPI :8000"]
+                end
+
+                subgraph APP2["app2 Deployment — 2 pods + HPA 2-5"]
+                    A2A["Node.js Express :3001"]
+                    A2B["Node.js Express :3001"]
+                end
+
+                subgraph OBS["Observabilidade"]
+                    EXP["Nginx Exporter :9113"]
+                    PROM["Prometheus :9090"]
+                    GRAF["Grafana :3000"]
+                end
+
+                PVC1[("PVC Prometheus 5Gi")]
+                PVC2[("PVC Grafana 2Gi")]
             end
         end
     end
 
-    Dev -->|"push main"| CICD
-    Test --> Build --> PushImg --> AR
-    AR -->|"docker pull"| VM
-    Internet --> FW --> NginxP
-    NginxP --> App1P
-    NginxP --> App2P
+    subgraph CICD["CI/CD — GitHub Actions"]
+        T["1. Testes"]
+        B["2. Build & Push"]
+        D["3. Deploy kubectl"]
+    end
+
+    DEV --> T
+    T --> B
+    B --> AR
+    B --> D
+    D --> GKE
+
+    CLIENT --> LB
+    LB --> NP
+    NP -->|"Cache MISS /app1/ TTL 10s"| APP1
+    NP -->|"Cache MISS /app2/ TTL 60s"| APP2
+    NP --> EXP
+    EXP --> PROM
+    PROM --> PVC1
+    PROM --> GRAF
+    GRAF --> PVC2
 ```
 
 ---
 
-## 4. Fluxo de Requisição (com Cache)
+## Diagrama — Fluxo de Requisicao com Cache
 
 ```mermaid
 sequenceDiagram
-    participant C  as 🌐 Cliente
-    participant N  as ⚙️ Nginx Cache
-    participant A1 as 🐍 App 1 (FastAPI)
-    participant A2 as 🟢 App 2 (Express)
-
-    Note over N: app1_cache TTL = 10s
-    Note over N: app2_cache TTL = 60s
+    participant C as Cliente
+    participant N as Nginx Cache
+    participant A as App Pod
 
     C->>N: GET /app1/time
-    alt Cache MISS
-        N->>A1: GET /time
-        A1-->>N: {"time": "..."}
-        N-->>C: 200 OK  X-Cache-Status: MISS
-        Note over N: Armazena por 10s
-    else Cache HIT (< 10s)
-        N-->>C: 200 OK  X-Cache-Status: HIT
-    end
-
-    C->>N: GET /app2/text
-    alt Cache MISS
-        N->>A2: GET /text
-        A2-->>N: {"message": "..."}
-        N-->>C: 200 OK  X-Cache-Status: MISS
-        Note over N: Armazena por 60s
-    else Cache HIT (< 60s)
-        N-->>C: 200 OK  X-Cache-Status: HIT
+    alt Cache HIT
+        N-->>C: 200 OK X-Cache-Status HIT
+    else Cache MISS
+        N->>A: GET /time
+        A-->>N: 200 OK time iso
+        N-->>C: 200 OK X-Cache-Status MISS
+        Note over N: Armazena 10s app1 ou 60s app2
     end
 ```
 
 ---
 
-## 5. Fluxo de Atualização
-
-### 5.1 — Código das Aplicações (CI/CD automatizado)
+## Diagrama — Fluxo de Atualizacao CI/CD
 
 ```mermaid
 flowchart LR
-    Dev["👨‍💻 git push\nmain"] --> GH["GitHub\nActions"]
-    GH --> Test["✅ Testes\nautomáticos"]
-    Test --> Build["🔨 Build\nDocker image"]
-    Build --> AR["🗄️ Artifact\nRegistry\n:latest + :sha"]
-    AR --> SSH["🔑 SSH\nna VM"]
-    SSH --> Pull["📥 compose\npull"]
-    Pull --> Up["🚀 compose\nup -d"]
-    Up --> Health["❤️ Health\nCheck"]
-    Health -->|"OK"| Done["✅ Deploy\nconcluído"]
-    Health -->|"Falha"| Roll["⏪ Rollback\ntag anterior"]
+    DEV["Developer"]
+
+    subgraph GH["GitHub Actions"]
+        T["1. Testes\npytest + node:test"]
+        B["2. Build Push\ndocker sha"]
+        D["3. Deploy GKE\nkubectl rollout"]
+    end
+
+    subgraph GCP["Google Cloud"]
+        AR["Artifact Registry\napp1:sha app2:sha"]
+        subgraph GKE["GKE Autopilot"]
+            OLD["Pod antigo"]
+            NEW["Pod novo sha"]
+        end
+    end
+
+    DEV -->|"git push main"| T
+    T -->|"ok"| B
+    B --> AR
+    B --> D
+    D -->|"RollingUpdate maxUnavailable=0"| GKE
+    OLD -.->|"removido apos novo healthy"| NEW
 ```
 
-### 5.2 — Infraestrutura (Terraform)
-
-```mermaid
-flowchart LR
-    Edit["✏️ Editar\n.tf files"] --> Plan["📋 terraform\nplan"]
-    Plan --> Review["👀 Code\nReview / PR"]
-    Review -->|"Aprovado"| Apply["⚡ terraform\napply"]
-    Apply --> GCP["☁️ GCP\natualizado"]
-    Review -->|"Rejeitado"| Edit
-```
-
-### 5.3 — Config Nginx (sem downtime)
-
-```mermaid
-flowchart LR
-    Cfg["📝 Editar\nnginx.conf"] --> Val["🔎 nginx -t\n(valida config)"]
-    Val -->|"OK"| Reload["🔄 nginx -s reload\n(zero downtime)"]
-    Val -->|"Erro"| Block["🚫 Bloqueado\n(não aplica)"]
-    Reload --> Health["❤️ Health Check"]
-    Health -->|"OK"| Done["✅ Config\naplicada"]
-    Health -->|"Falha"| Revert["⏪ git revert\n+ redeploy"]
-```
+> **RollingUpdate com maxUnavailable 0** garante zero downtime.
+> O pod novo sobe, passa no readinessProbe, e so entao o pod antigo e removido.
 
 ---
 
-## 6. Análise e Pontos de Melhoria
+## Componentes e Responsabilidades
+
+| Componente | Tecnologia | Tipo K8s | Replicas | Porta |
+|------------|-----------|----------|----------|-------|
+| App 1 | Python FastAPI | Deployment | 2-5 HPA | 8000 |
+| App 2 | Node.js Express | Deployment | 2-5 HPA | 3001 |
+| Nginx proxy+cache | nginx:alpine | Deployment | 1 | 80 |
+| Nginx Exporter | nginx-prometheus-exporter | Deployment | 1 | 9113 |
+| Prometheus | prom/prometheus | Deployment | 1 | 9090 |
+| Grafana | grafana/grafana | Deployment | 1 | 3000 |
+
+---
+
+## Cache — Configuracao
+
+| App | Cache Zone | TTL | Header de resposta |
+|-----|-----------|-----|--------------------|
+| App 1 | app1_cache 10MB | **10 segundos** | X-Cache-Status: HIT ou MISS |
+| App 2 | app2_cache 10MB | **1 minuto** | X-Cache-Status: HIT ou MISS |
+
+---
+
+## Analise e Sugestoes de Melhoria
 
 ### Pontos fortes da arquitetura atual
 
-- ✅ Cache centralizado no Nginx sem modificar código das apps
-- ✅ TTLs diferentes por serviço (`app1_cache: 10s` / `app2_cache: 60s`)
-- ✅ Headers `X-Cache-Status` e `X-Cache-TTL` em todas as respostas (debug fácil)
-- ✅ Redes Docker separadas (`backend` / `monitoring`)
-- ✅ Health checks em todos os containers
-- ✅ IaC com Terraform — infra versionada e reproduzível
-- ✅ CI/CD automatizado com GitHub Actions (test → build → push → deploy)
-- ✅ Imagens versionadas por SHA do commit no Artifact Registry
+- GKE Autopilot — Google gerencia os nodes, escala sem configuracao manual
+- Rolling Update com zero downtime — maxUnavailable 0 garante disponibilidade
+- HPA — escala pods de app1 e app2 baseado em CPU e memoria
+- Cache no proxy — sem alterar codigo das apps, TTLs diferentes por servico
+- Imutabilidade de imagem — cada deploy usa o SHA exato do commit
+- Testes no CI — bloqueia deploy se os testes falharem
+- Observabilidade — Prometheus coleta metricas, Grafana exibe dashboards
+- PersistentVolumeClaims — dados sobrevivem a restarts de pods
 
----
+### Sugestoes de melhoria
 
-### Sugestões de Melhoria
-
-| # | Melhoria | Impacto | Esforço |
-|---|----------|:-------:|:-------:|
-| 1 | **Kubernetes (GKE)** — HPA, rolling updates, self-healing | 🔴 Alto | 🔴 Alto |
-| 2 | **Cloud Load Balancer** — GLB gerenciado em vez de IP direto da VM | 🔴 Alto | 🟡 Médio |
-| 3 | **HTTPS / TLS** — Managed Certificate no GCP ou Let's Encrypt | 🔴 Alto | 🟢 Baixo |
-| 4 | **Redis como cache distribuído** — cache entre múltiplas réplicas, TTL por chave | 🟡 Médio | 🟡 Médio |
-| 5 | **Múltiplas réplicas + LB** — escalar app1/app2 horizontalmente | 🔴 Alto | 🟡 Médio |
-| 6 | **Cloud Armor** — WAF + proteção contra DDoS | 🔴 Alto | 🟡 Médio |
-| 7 | **OpenTelemetry + Jaeger** — distributed tracing ponta a ponta | 🟡 Médio | 🟡 Médio |
-| 8 | **Loki + Promtail + Grafana** — agregação centralizada de logs | 🟡 Médio | 🟢 Baixo |
-| 9 | **Terraform remote state (GCS)** — estado compartilhado em Cloud Storage | 🔴 Alto | 🟢 Baixo |
-| 10 | **Resource limits** — CPU/Memory limits nos containers | 🟡 Médio | 🟢 Baixo |
-| 11 | **Alertas Grafana/Alertmanager** — notificar no Slack se cache hit rate cair | 🟡 Médio | 🟢 Baixo |
-| 12 | **GCP Secret Manager** — credenciais via secret manager em vez de env vars | 🔴 Alto | 🟢 Baixo |
-
----
-
-## 7. Estimativa de Custo Mensal (GCP — us-central1)
-
-| Recurso | Configuração | Custo estimado/mês |
-|---------|-------------|-------------------:|
-| GCE VM | e2-medium 24/7 | ~$27,00 |
-| Artifact Registry | 1 GB storage | ~$0,10 |
-| Egress de rede | ~10 GB | ~$1,20 |
-| **Total estimado** | | **~$28/mês** |
-
-> 💡 Com os **$1.700 de créditos** da conta de testes GCP, a infraestrutura tem aproximadamente **5 anos** de operação contínua.
+| # | Melhoria | Justificativa |
+|---|----------|---------------|
+| 1 | Helm Charts | Parametrizar manifests e gerenciar releases com rollback |
+| 2 | Ingress + cert-manager | HTTPS automatico via Lets Encrypt, elimina LoadBalancer por servico |
+| 3 | Workload Identity Federation | Autenticacao GCP sem chave JSON no CI |
+| 4 | Kubernetes Secrets | Mover senhas para Secret em vez de env plain |
+| 5 | Redis como cache distribuido | Cache persiste entre restarts e compartilhado entre replicas nginx |
+| 6 | Cloud Armor | WAF e protecao DDoS na frente do Load Balancer |
+| 7 | Cloud CDN | Cache na borda global para conteudo estatico |
+| 8 | Loki + Grafana | Centralizar logs dos pods junto as metricas |
+| 9 | OpenTelemetry | Distributed tracing entre nginx e apps |
+| 10 | Multi-region | Cluster em multiplas regioes com Cloud DNS para failover global |
+| 11 | ArgoCD ou Flux | GitOps — cluster observa o repo e aplica changes automaticamente |
+| 12 | VPC privada | Apps em subrede privada, apenas nginx exposto publicamente |

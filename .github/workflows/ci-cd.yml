@@ -8,9 +8,9 @@ on:
 
 env:
   REGION: us-central1
-  ZONE: us-central1-a
   REPO_NAME: devops-challenge
-  VM_NAME: devops-challenge-vm
+  CLUSTER_NAME: devops-challenge-cluster
+  NAMESPACE: devops-challenge
 
 jobs:
   # ============================================================
@@ -24,6 +24,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ── App 1: Python / FastAPI ──────────────────────────────
       - name: Configurar Python 3.12
         uses: actions/setup-python@v5
         with:
@@ -33,30 +34,14 @@ jobs:
         run: |
           cd app1
           pip install -r requirements.txt
-          pip install httpx pytest pytest-asyncio
+          pip install httpx pytest
 
-      - name: Testar App 1 (FastAPI)
+      - name: Testar App 1 (pytest)
         run: |
           cd app1
-          python -c "
-          import main
-          from fastapi.testclient import TestClient
-          client = TestClient(main.app)
+          pytest test_main.py -v
 
-          r = client.get('/health')
-          assert r.status_code == 200
-
-          r = client.get('/text')
-          assert r.status_code == 200
-          assert 'message' in r.json()
-
-          r = client.get('/time')
-          assert r.status_code == 200
-          assert 'time' in r.json()
-
-          print('App 1: todos os testes passaram!')
-          "
-
+      # ── App 2: Node.js / Express ─────────────────────────────
       - name: Configurar Node.js 20
         uses: actions/setup-node@v4
         with:
@@ -67,14 +52,10 @@ jobs:
           cd app2
           npm ci
 
-      - name: Testar App 2 (Express)
+      - name: Testar App 2 (Node test runner)
         run: |
           cd app2
-          node -e "
-          const app = require('./index');
-          console.log('App 2: módulo carregado com sucesso!');
-          process.exit(0);
-          " || true
+          npm test
 
   # ============================================================
   # JOB 2 — Build e push das imagens (apenas na main)
@@ -123,10 +104,10 @@ jobs:
           docker push "$REGISTRY/app2:${{ github.sha }}"
 
   # ============================================================
-  # JOB 3 — Deploy na VM GCE (apenas na main)
+  # JOB 3 — Deploy no GKE (apenas na main)
   # ============================================================
   deploy:
-    name: Deploy GCE
+    name: Deploy GKE
     runs-on: ubuntu-latest
     needs: build-and-push
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -143,34 +124,73 @@ jobs:
       - name: Configurar gcloud CLI
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Deploy na VM via SSH
+      - name: Configurar kubectl (credenciais do GKE)
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.CLUSTER_NAME }}
+          location: ${{ env.REGION }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Aplicar namespace e ConfigMaps
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/nginx/configmap.yaml
+          kubectl apply -f k8s/observability/prometheus/configmap.yaml
+          kubectl apply -f k8s/observability/grafana/configmap.yaml
+          kubectl apply -f k8s/observability/prometheus/pvc.yaml
+          kubectl apply -f k8s/observability/grafana/pvc.yaml
+
+      - name: Substituir imagem App 1 pelo SHA do commit
         env:
           REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}
         run: |
-          gcloud compute ssh ${{ env.VM_NAME }} \
-            --zone=${{ env.ZONE }} \
-            --command="
-              set -e
-              cd /opt/app
-              git pull
-              export REGISTRY=$REGISTRY
-              docker compose -f docker-compose.prod.yml pull
-              docker compose -f docker-compose.prod.yml up -d --remove-orphans
-              docker image prune -f
-            "
+          sed -i "s|us-central1-docker.pkg.dev/PROJECT_ID/devops-challenge/app1:latest|$REGISTRY/app1:${{ github.sha }}|g" \
+            k8s/app1/deployment.yaml
 
-      - name: Obter IP e exibir URLs
+      - name: Substituir imagem App 2 pelo SHA do commit
+        env:
+          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}
         run: |
-          VM_IP=$(gcloud compute instances describe ${{ env.VM_NAME }} \
-            --zone=${{ env.ZONE }} \
-            --format="get(networkInterfaces[0].accessConfigs[0].natIP)")
-          echo "## Deploy concluído!" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Serviço | URL |" >> $GITHUB_STEP_SUMMARY
-          echo "|---------|-----|" >> $GITHUB_STEP_SUMMARY
-          echo "| App 1 - texto | http://$VM_IP/app1/text |" >> $GITHUB_STEP_SUMMARY
-          echo "| App 1 - horário | http://$VM_IP/app1/time |" >> $GITHUB_STEP_SUMMARY
-          echo "| App 2 - texto | http://$VM_IP/app2/text |" >> $GITHUB_STEP_SUMMARY
-          echo "| App 2 - horário | http://$VM_IP/app2/time |" >> $GITHUB_STEP_SUMMARY
-          echo "| Grafana | http://$VM_IP:3000 |" >> $GITHUB_STEP_SUMMARY
-          echo "| Prometheus | http://$VM_IP:9090 |" >> $GITHUB_STEP_SUMMARY
+          sed -i "s|us-central1-docker.pkg.dev/PROJECT_ID/devops-challenge/app2:latest|$REGISTRY/app2:${{ github.sha }}|g" \
+            k8s/app2/deployment.yaml
+
+      - name: Deploy de todos os manifests no GKE
+        run: |
+          kubectl apply -f k8s/app1/
+          kubectl apply -f k8s/app2/
+          kubectl apply -f k8s/nginx/
+          kubectl apply -f k8s/observability/prometheus/
+          kubectl apply -f k8s/observability/grafana/
+
+      - name: Aguardar rollout App 1 (zero downtime)
+        run: kubectl rollout status deployment/app1 -n ${{ env.NAMESPACE }} --timeout=120s
+
+      - name: Aguardar rollout App 2 (zero downtime)
+        run: kubectl rollout status deployment/app2 -n ${{ env.NAMESPACE }} --timeout=120s
+
+      - name: Aguardar rollout Nginx
+        run: kubectl rollout status deployment/nginx -n ${{ env.NAMESPACE }} --timeout=120s
+
+      - name: Exibir URLs finais
+        run: |
+          echo "Aguardando IP externo do LoadBalancer..."
+          for i in {1..12}; do
+            IP=$(kubectl get svc nginx -n ${{ env.NAMESPACE }} \
+              -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+            if [ -n "$IP" ]; then
+              echo "## Deploy GKE concluido!" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "| Servico | URL |" >> $GITHUB_STEP_SUMMARY
+              echo "|---------|-----|" >> $GITHUB_STEP_SUMMARY
+              echo "| App 1 texto | http://$IP/app1/text |" >> $GITHUB_STEP_SUMMARY
+              echo "| App 1 horario | http://$IP/app1/time |" >> $GITHUB_STEP_SUMMARY
+              echo "| App 2 texto | http://$IP/app2/text |" >> $GITHUB_STEP_SUMMARY
+              echo "| App 2 horario | http://$IP/app2/time |" >> $GITHUB_STEP_SUMMARY
+              break
+            fi
+            echo "Aguardando... ($i/12)"
+            sleep 10
+          done
+
+      - name: Status final dos pods
+        run: kubectl get pods -n ${{ env.NAMESPACE }}
