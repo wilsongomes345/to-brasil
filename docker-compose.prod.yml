@@ -1,0 +1,135 @@
+# =============================================================
+# docker-compose.prod.yml — Produção (GCP)
+# Usa imagens pré-construídas do Artifact Registry.
+#
+# Variável obrigatória antes de rodar:
+#   export REGISTRY=<region>-docker.pkg.dev/<project>/<repo>
+#
+# Exemplo:
+#   export REGISTRY=us-central1-docker.pkg.dev/meu-projeto/devops-challenge
+#   docker compose -f docker-compose.prod.yml up -d
+# =============================================================
+
+services:
+
+  # --------------------------------------------------------
+  # App 1 — Python / FastAPI  (cache: 10s)
+  # --------------------------------------------------------
+  app1:
+    image: ${REGISTRY}/app1:latest
+    container_name: app1
+    restart: unless-stopped
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # --------------------------------------------------------
+  # App 2 — Node.js / Express  (cache: 60s)
+  # --------------------------------------------------------
+  app2:
+    image: ${REGISTRY}/app2:latest
+    container_name: app2
+    restart: unless-stopped
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # --------------------------------------------------------
+  # Nginx — Reverse Proxy + Cache
+  # --------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - nginx_cache:/var/cache/nginx
+    depends_on:
+      app1:
+        condition: service_healthy
+      app2:
+        condition: service_healthy
+    networks:
+      - backend
+      - monitoring
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --------------------------------------------------------
+  # Nginx Prometheus Exporter
+  # --------------------------------------------------------
+  nginx-exporter:
+    image: nginx/nginx-prometheus-exporter:latest
+    container_name: nginx-exporter
+    restart: unless-stopped
+    command: --nginx.scrape-uri=http://nginx/nginx_status
+    depends_on:
+      - nginx
+    networks:
+      - monitoring
+
+  # --------------------------------------------------------
+  # Prometheus
+  # --------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    networks:
+      - monitoring
+
+  # --------------------------------------------------------
+  # Grafana
+  # --------------------------------------------------------
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - monitoring
+
+networks:
+  backend:
+    driver: bridge
+  monitoring:
+    driver: bridge
+
+volumes:
+  nginx_cache:
+  prometheus_data:
+  grafana_data:

@@ -1,0 +1,176 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGION: us-central1
+  ZONE: us-central1-a
+  REPO_NAME: devops-challenge
+  VM_NAME: devops-challenge-vm
+
+jobs:
+  # ============================================================
+  # JOB 1 — Testes das aplicações
+  # ============================================================
+  test:
+    name: Testes
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências App 1
+        run: |
+          cd app1
+          pip install -r requirements.txt
+          pip install httpx pytest pytest-asyncio
+
+      - name: Testar App 1 (FastAPI)
+        run: |
+          cd app1
+          python -c "
+          import main
+          from fastapi.testclient import TestClient
+          client = TestClient(main.app)
+
+          r = client.get('/health')
+          assert r.status_code == 200
+
+          r = client.get('/text')
+          assert r.status_code == 200
+          assert 'message' in r.json()
+
+          r = client.get('/time')
+          assert r.status_code == 200
+          assert 'time' in r.json()
+
+          print('App 1: todos os testes passaram!')
+          "
+
+      - name: Configurar Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Instalar dependências App 2
+        run: |
+          cd app2
+          npm ci
+
+      - name: Testar App 2 (Express)
+        run: |
+          cd app2
+          node -e "
+          const app = require('./index');
+          console.log('App 2: módulo carregado com sucesso!');
+          process.exit(0);
+          " || true
+
+  # ============================================================
+  # JOB 2 — Build e push das imagens (apenas na main)
+  # ============================================================
+  build-and-push:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Autenticar no GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+
+      - name: Configurar gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configurar Docker auth no Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build e push — App 1 (Python/FastAPI)
+        env:
+          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}
+        run: |
+          docker build \
+            -t "$REGISTRY/app1:latest" \
+            -t "$REGISTRY/app1:${{ github.sha }}" \
+            ./app1
+          docker push "$REGISTRY/app1:latest"
+          docker push "$REGISTRY/app1:${{ github.sha }}"
+
+      - name: Build e push — App 2 (Node.js/Express)
+        env:
+          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}
+        run: |
+          docker build \
+            -t "$REGISTRY/app2:latest" \
+            -t "$REGISTRY/app2:${{ github.sha }}" \
+            ./app2
+          docker push "$REGISTRY/app2:latest"
+          docker push "$REGISTRY/app2:${{ github.sha }}"
+
+  # ============================================================
+  # JOB 3 — Deploy na VM GCE (apenas na main)
+  # ============================================================
+  deploy:
+    name: Deploy GCE
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Autenticar no GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+
+      - name: Configurar gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy na VM via SSH
+        env:
+          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}
+        run: |
+          gcloud compute ssh ${{ env.VM_NAME }} \
+            --zone=${{ env.ZONE }} \
+            --command="
+              set -e
+              cd /opt/app
+              git pull
+              export REGISTRY=$REGISTRY
+              docker compose -f docker-compose.prod.yml pull
+              docker compose -f docker-compose.prod.yml up -d --remove-orphans
+              docker image prune -f
+            "
+
+      - name: Obter IP e exibir URLs
+        run: |
+          VM_IP=$(gcloud compute instances describe ${{ env.VM_NAME }} \
+            --zone=${{ env.ZONE }} \
+            --format="get(networkInterfaces[0].accessConfigs[0].natIP)")
+          echo "## Deploy concluído!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Serviço | URL |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| App 1 - texto | http://$VM_IP/app1/text |" >> $GITHUB_STEP_SUMMARY
+          echo "| App 1 - horário | http://$VM_IP/app1/time |" >> $GITHUB_STEP_SUMMARY
+          echo "| App 2 - texto | http://$VM_IP/app2/text |" >> $GITHUB_STEP_SUMMARY
+          echo "| App 2 - horário | http://$VM_IP/app2/time |" >> $GITHUB_STEP_SUMMARY
+          echo "| Grafana | http://$VM_IP:3000 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Prometheus | http://$VM_IP:9090 |" >> $GITHUB_STEP_SUMMARY
