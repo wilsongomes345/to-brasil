@@ -1,0 +1,12 @@
+{
+  "name": "app2",
+  "version": "1.0.0",
+  "description": "App 2 - Node.js Express",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
