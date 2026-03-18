@@ -37,11 +37,10 @@ echo -e "${N}"
 
 # ── Pré-requisitos ─────────────────────────────────────────────
 step "Verificando pré-requisitos..."
-[[ -f "$CREDS" ]]           || die "$CREDS não encontrado na pasta atual"
+[[ -f "$CREDS" ]]            || die "$CREDS não encontrado na pasta atual"
 command -v gcloud    &>/dev/null || die "gcloud não instalado"
 command -v terraform &>/dev/null || die "terraform não instalado"
 command -v kubectl   &>/dev/null || die "kubectl não instalado"
-command -v gcloud &>/dev/null || die "gcloud não encontrado no PATH"
 ok "Todas as ferramentas disponíveis"
 
 # ── Extrai dados do credentials.json ──────────────────────────
@@ -95,8 +94,25 @@ terraform apply  -auto-approve -input=false -no-color 2>&1 | grep -E "Apply|crea
 cd ../..
 ok "Cluster GKE e Artifact Registry prontos"
 
-# ── 3. Configura kubectl ──────────────────────────────────────
+# ── 3. Instala gke-gcloud-auth-plugin e configura kubectl ─────
 step "3/6 — Configurando kubectl para o cluster GKE..."
+
+# Plugin obrigatório para autenticação kubectl ↔ GKE
+gcloud components install gke-gcloud-auth-plugin --quiet 2>/dev/null || true
+export USE_GKE_GCLOUD_AUTH_PLUGIN=True
+
+# Aguarda cluster ficar RUNNING antes de pegar credenciais
+echo -n "  Aguardando cluster ficar RUNNING"
+for i in {1..30}; do
+  STATUS=$(gcloud container clusters describe "$CLUSTER" \
+    --region "$REGION" --project "$PROJECT_ID" \
+    --format="value(status)" 2>/dev/null || echo "NOT_FOUND")
+  [[ "$STATUS" == "RUNNING" ]] && echo " OK!" && break
+  printf "."
+  sleep 15
+  [[ $i -eq 30 ]] && echo "" && die "Cluster não ficou RUNNING em tempo hábil."
+done
+
 gcloud container clusters get-credentials "$CLUSTER" \
   --region "$REGION" --project "$PROJECT_ID"
 ok "kubectl apontando para $CLUSTER"

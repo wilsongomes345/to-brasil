@@ -55,5 +55,14 @@ resource "google_container_cluster" "gke" {
     channel = "REGULAR"
   }
 
+  # Ignora mudanças em atributos computados pelo GKE após criação
+  # (evita destroy/recreate desnecessário em re-execuções do Terraform)
+  lifecycle {
+    ignore_changes = [
+      cluster_autoscaling,
+      private_cluster_config,
+    ]
+  }
+
   depends_on = [google_project_service.apis]
 }
