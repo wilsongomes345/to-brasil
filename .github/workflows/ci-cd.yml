@@ -156,14 +156,14 @@ jobs:
             --ssh-flag="-o StrictHostKeyChecking=no" \
             --command="
               set -e
-              git config --global --add safe.directory /opt/app
+              sudo git config --global --add safe.directory /opt/app
               cd /opt/app
-              git pull origin main
-              echo 'REGISTRY=$REGISTRY' > .env
-              gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
-              docker compose -f docker-compose.prod.yml pull
-              docker compose -f docker-compose.prod.yml up -d --remove-orphans
-              docker compose -f docker-compose.prod.yml ps
+              sudo git pull origin main
+              echo 'REGISTRY=$REGISTRY' | sudo tee .env
+              sudo gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+              sudo docker compose -f docker-compose.prod.yml pull
+              sudo docker compose -f docker-compose.prod.yml up -d --remove-orphans
+              sudo docker compose -f docker-compose.prod.yml ps
             "
 
       - name: Resumo do deploy
