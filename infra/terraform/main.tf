@@ -18,10 +18,9 @@ provider "google" {
 # -------------------------------------------------------
 resource "google_project_service" "apis" {
   for_each = toset([
-    "container.googleapis.com",          # GKE
-    "artifactregistry.googleapis.com",   # Artifact Registry
-    "compute.googleapis.com",            # Necessário pelo GKE
-    "cloudbuild.googleapis.com",         # Cloud Build (build de imagens sem Docker local)
+    "compute.googleapis.com",
+    "artifactregistry.googleapis.com",
+    "cloudbuild.googleapis.com",
   ])
   service            = each.key
   disable_on_destroy = false
@@ -39,30 +38,58 @@ resource "google_artifact_registry_repository" "docker_repo" {
 }
 
 # -------------------------------------------------------
-# GKE Autopilot Cluster
-# Autopilot: Google gerencia os nodes automaticamente,
-# cobra por pod (não por node), escala sem configuração.
+# Firewall — abre portas da aplicação
 # -------------------------------------------------------
-resource "google_container_cluster" "gke" {
-  name     = var.cluster_name
-  location = var.region  # Regional = alta disponibilidade
+resource "google_compute_firewall" "allow_app" {
+  name    = "devops-challenge-allow"
+  network = "default"
 
-  enable_autopilot    = true
-  deletion_protection = false
-
-  # Versão do Kubernetes gerenciada pelo GKE (release channel)
-  release_channel {
-    channel = "REGULAR"
+  allow {
+    protocol = "tcp"
+    ports    = ["22", "80", "3000", "9090"]
   }
 
-  # Ignora mudanças em atributos computados pelo GKE após criação
-  # (evita destroy/recreate desnecessário em re-execuções do Terraform)
-  lifecycle {
-    ignore_changes = [
-      cluster_autoscaling,
-      private_cluster_config,
-    ]
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["devops-challenge"]
+  depends_on    = [google_project_service.apis]
+}
+
+# -------------------------------------------------------
+# GCE VM — roda o Docker Compose
+# -------------------------------------------------------
+resource "google_compute_instance" "vm" {
+  name         = "devops-challenge-vm"
+  machine_type = var.machine_type
+  zone         = var.zone
+  tags         = ["devops-challenge"]
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+      size  = 20
+      type  = "pd-standard"
+    }
   }
 
-  depends_on = [google_project_service.apis]
+  network_interface {
+    network = "default"
+    access_config {} # IP externo efêmero
+  }
+
+  # Startup script lê variáveis do metadata server (sem conflito com bash)
+  metadata = {
+    region         = var.region
+    repo_name      = var.repo_name
+    startup-script = file("${path.module}/../scripts/startup.sh")
+  }
+
+  # Service Account com acesso ao Artifact Registry e Cloud Build
+  service_account {
+    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+  }
+
+  depends_on = [
+    google_project_service.apis,
+    google_artifact_registry_repository.docker_repo,
+  ]
 }

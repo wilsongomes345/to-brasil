@@ -7,190 +7,132 @@ on:
     branches: [main]
 
 env:
-  REGION: us-central1
-  REPO_NAME: devops-challenge
-  CLUSTER_NAME: devops-challenge-cluster
-  NAMESPACE: devops-challenge
+  REGION:   us-central1
+  ZONE:     us-central1-a
+  REPO:     devops-challenge
+  VM_NAME:  devops-challenge-vm
 
 jobs:
   # ============================================================
-  # JOB 1 — Testes das aplicações
+  # JOB 1 — Testes
   # ============================================================
   test:
     name: Testes
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # ── App 1: Python / FastAPI ──────────────────────────────
-      - name: Configurar Python 3.12
-        uses: actions/setup-python@v5
+      # App 1 — Python / FastAPI
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Instalar dependências App 1
+      - name: Instalar e testar App 1
         run: |
           cd app1
-          pip install -r requirements.txt
-          pip install "httpx<0.28" pytest
-
-      - name: Testar App 1 (pytest)
-        run: |
-          cd app1
+          pip install -r requirements.txt "httpx<0.28" pytest
           pytest test_main.py -v
 
-      # ── App 2: Node.js / Express ─────────────────────────────
-      - name: Configurar Node.js 20
-        uses: actions/setup-node@v4
+      # App 2 — Node.js / Express
+      - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Instalar dependências App 2
+      - name: Instalar e testar App 2
         run: |
           cd app2
           npm install
-
-      - name: Testar App 2 (Node test runner)
-        run: |
-          cd app2
           npm test
 
   # ============================================================
-  # JOB 2 — Build e push das imagens (apenas na main)
+  # JOB 2 — Build e push (apenas na main)
   # ============================================================
-  build-and-push:
+  build:
     name: Build & Push
     runs-on: ubuntu-latest
     needs: test
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Autenticar no GCP
-        uses: google-github-actions/auth@v2
+      - uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_CREDENTIALS }}
 
-      - name: Configurar gcloud CLI
-        uses: google-github-actions/setup-gcloud@v2
+      - uses: google-github-actions/setup-gcloud@v2
 
-      - name: Configurar Docker auth no Artifact Registry
+      - name: Configurar Docker → Artifact Registry
         run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
 
-      - name: Build e push — App 1 (Python/FastAPI)
+      - name: Build e push App 1 (Python/FastAPI)
         env:
-          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}
+          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}
         run: |
-          docker build \
-            -t "$REGISTRY/app1:latest" \
-            -t "$REGISTRY/app1:${{ github.sha }}" \
-            ./app1
-          docker push "$REGISTRY/app1:latest"
-          docker push "$REGISTRY/app1:${{ github.sha }}"
+          docker build -t $REGISTRY/app1:latest -t $REGISTRY/app1:${{ github.sha }} ./app1
+          docker push $REGISTRY/app1:latest
+          docker push $REGISTRY/app1:${{ github.sha }}
 
-      - name: Build e push — App 2 (Node.js/Express)
+      - name: Build e push App 2 (Node.js/Express)
         env:
-          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}
+          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}
         run: |
-          docker build \
-            -t "$REGISTRY/app2:latest" \
-            -t "$REGISTRY/app2:${{ github.sha }}" \
-            ./app2
-          docker push "$REGISTRY/app2:latest"
-          docker push "$REGISTRY/app2:${{ github.sha }}"
+          docker build -t $REGISTRY/app2:latest -t $REGISTRY/app2:${{ github.sha }} ./app2
+          docker push $REGISTRY/app2:latest
+          docker push $REGISTRY/app2:${{ github.sha }}
 
   # ============================================================
-  # JOB 3 — Deploy no GKE (apenas na main)
+  # JOB 3 — Deploy via SSH na VM GCE
   # ============================================================
   deploy:
-    name: Deploy GKE
+    name: Deploy GCE
     runs-on: ubuntu-latest
-    needs: build-and-push
+    needs: build
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Autenticar no GCP
-        uses: google-github-actions/auth@v2
+      - uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_CREDENTIALS }}
 
-      - name: Configurar gcloud CLI
-        uses: google-github-actions/setup-gcloud@v2
+      - uses: google-github-actions/setup-gcloud@v2
 
-      - name: Configurar kubectl (credenciais do GKE)
-        uses: google-github-actions/get-gke-credentials@v2
-        with:
-          cluster_name: ${{ env.CLUSTER_NAME }}
-          location: ${{ env.REGION }}
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
-
-      - name: Aplicar namespace e ConfigMaps
-        run: |
-          kubectl apply -f k8s/namespace.yaml
-          kubectl apply -f k8s/nginx/configmap.yaml
-          kubectl apply -f k8s/observability/prometheus/configmap.yaml
-          kubectl apply -f k8s/observability/grafana/configmap.yaml
-          kubectl apply -f k8s/observability/prometheus/pvc.yaml
-          kubectl apply -f k8s/observability/grafana/pvc.yaml
-
-      - name: Substituir imagem App 1 pelo SHA do commit
+      - name: Deploy via SSH (gcloud compute ssh)
         env:
-          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}
+          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}
+          PROJECT:  ${{ secrets.GCP_PROJECT_ID }}
         run: |
-          sed -i "s|us-central1-docker.pkg.dev/PROJECT_ID/devops-challenge/app1:latest|$REGISTRY/app1:${{ github.sha }}|g" \
-            k8s/app1/deployment.yaml
+          gcloud compute ssh ${{ env.VM_NAME }} \
+            --zone=${{ env.ZONE }} \
+            --project=$PROJECT \
+            --quiet \
+            --ssh-flag="-o StrictHostKeyChecking=no" \
+            --command="
+              set -e
+              cd /opt/app
+              git pull origin main
+              echo 'REGISTRY=$REGISTRY' > .env
+              gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+              docker compose -f docker-compose.prod.yml pull
+              docker compose -f docker-compose.prod.yml up -d --remove-orphans
+              docker compose -f docker-compose.prod.yml ps
+            "
 
-      - name: Substituir imagem App 2 pelo SHA do commit
+      - name: Exibir URLs
         env:
-          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO_NAME }}
+          PROJECT: ${{ secrets.GCP_PROJECT_ID }}
         run: |
-          sed -i "s|us-central1-docker.pkg.dev/PROJECT_ID/devops-challenge/app2:latest|$REGISTRY/app2:${{ github.sha }}|g" \
-            k8s/app2/deployment.yaml
-
-      - name: Deploy de todos os manifests no GKE
-        run: |
-          kubectl apply -f k8s/app1/
-          kubectl apply -f k8s/app2/
-          kubectl apply -f k8s/nginx/
-          kubectl apply -f k8s/observability/prometheus/
-          kubectl apply -f k8s/observability/grafana/
-
-      - name: Aguardar rollout App 1 (zero downtime)
-        run: kubectl rollout status deployment/app1 -n ${{ env.NAMESPACE }} --timeout=120s
-
-      - name: Aguardar rollout App 2 (zero downtime)
-        run: kubectl rollout status deployment/app2 -n ${{ env.NAMESPACE }} --timeout=120s
-
-      - name: Aguardar rollout Nginx
-        run: kubectl rollout status deployment/nginx -n ${{ env.NAMESPACE }} --timeout=120s
-
-      - name: Exibir URLs finais
-        run: |
-          echo "Aguardando IP externo do LoadBalancer..."
-          for i in {1..12}; do
-            IP=$(kubectl get svc nginx -n ${{ env.NAMESPACE }} \
-              -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
-            if [ -n "$IP" ]; then
-              echo "## Deploy GKE concluido!" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "| Servico | URL |" >> $GITHUB_STEP_SUMMARY
-              echo "|---------|-----|" >> $GITHUB_STEP_SUMMARY
-              echo "| App 1 texto | http://$IP/app1/text |" >> $GITHUB_STEP_SUMMARY
-              echo "| App 1 horario | http://$IP/app1/time |" >> $GITHUB_STEP_SUMMARY
-              echo "| App 2 texto | http://$IP/app2/text |" >> $GITHUB_STEP_SUMMARY
-              echo "| App 2 horario | http://$IP/app2/time |" >> $GITHUB_STEP_SUMMARY
-              break
-            fi
-            echo "Aguardando... ($i/12)"
-            sleep 10
-          done
-
-      - name: Status final dos pods
-        run: kubectl get pods -n ${{ env.NAMESPACE }}
+          IP=$(gcloud compute instances describe ${{ env.VM_NAME }} \
+            --zone=${{ env.ZONE }} --project=$PROJECT \
+            --format="get(networkInterfaces[0].accessConfigs[0].natIP)")
+          echo "## Deploy concluído!" >> $GITHUB_STEP_SUMMARY
+          echo "| Rota | URL |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| App 1 texto   (cache 10s) | http://$IP/app1/text |" >> $GITHUB_STEP_SUMMARY
+          echo "| App 1 horário (cache 10s) | http://$IP/app1/time |" >> $GITHUB_STEP_SUMMARY
+          echo "| App 2 texto   (cache 60s) | http://$IP/app2/text |" >> $GITHUB_STEP_SUMMARY
+          echo "| App 2 horário (cache 60s) | http://$IP/app2/time |" >> $GITHUB_STEP_SUMMARY
+          echo "| Prometheus | http://$IP:9090 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Grafana    | http://$IP:3000 |" >> $GITHUB_STEP_SUMMARY

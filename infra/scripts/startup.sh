@@ -57,17 +57,12 @@ else
 fi
 
 # -------------------------------------------------------
-# 5. Subir aplicação com docker compose
+# 5. Salvar .env e aguardar primeiro deploy do CI/CD
 # -------------------------------------------------------
-log "Iniciando aplicação..."
 cd "$APP_DIR"
+echo "REGISTRY=$REGISTRY" > .env
 
-export REGISTRY="$REGISTRY"
-docker compose -f docker-compose.prod.yml pull
-docker compose -f docker-compose.prod.yml up -d
-
-log "Startup concluído com sucesso!"
-log "App 1:      http://$(curl -sf $META/instance/network-interfaces/0/access-configs/0/external-ip -H "$HEADER")/app1/text"
-log "App 2:      http://$(curl -sf $META/instance/network-interfaces/0/access-configs/0/external-ip -H "$HEADER")/app2/text"
-log "Grafana:    http://$(curl -sf $META/instance/network-interfaces/0/access-configs/0/external-ip -H "$HEADER"):3000"
-log "Prometheus: http://$(curl -sf $META/instance/network-interfaces/0/access-configs/0/external-ip -H "$HEADER"):9090"
+VM_IP=$(curl -sf "$META/instance/network-interfaces/0/access-configs/0/external-ip" -H "$HEADER" || echo "?")
+log "VM pronta! IP: $VM_IP — aguardando primeiro deploy pelo CI/CD."
+log "  Registry: $REGISTRY"
+log "  App dir:  $APP_DIR"

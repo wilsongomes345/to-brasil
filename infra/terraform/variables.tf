@@ -4,15 +4,21 @@ variable "project_id" {
 }
 
 variable "region" {
-  description = "Região GCP (Autopilot é regional — alta disponibilidade)"
+  description = "Região GCP"
   type        = string
   default     = "us-central1"
 }
 
-variable "cluster_name" {
-  description = "Nome do cluster GKE"
+variable "zone" {
+  description = "Zona GCP"
   type        = string
-  default     = "devops-challenge-cluster"
+  default     = "us-central1-a"
+}
+
+variable "machine_type" {
+  description = "Tipo de máquina GCE (e2-medium = 2 vCPU / 4 GB RAM)"
+  type        = string
+  default     = "e2-medium"
 }
 
 variable "repo_name" {

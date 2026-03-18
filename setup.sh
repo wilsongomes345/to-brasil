@@ -1,24 +1,23 @@
 #!/usr/bin/env bash
 # =============================================================
-# setup.sh — Sobe toda a infraestrutura GCP/GKE com 1 comando
+# setup.sh — Provisiona toda a infra GCP e faz o primeiro deploy
 # Uso: bash setup.sh
+# Requisito: credentials.json na mesma pasta
 # =============================================================
 set -euo pipefail
 
-# ── PATH: adiciona ferramentas instaladas via winget/Google SDK ─
-# gcloud precisa do Python bundled (resolve conflito com Windows Store)
+# ── PATH: ferramentas instaladas no Windows via winget/Google SDK ─
 export CLOUDSDK_PYTHON="/c/Program Files (x86)/Google/Cloud SDK/google-cloud-sdk/platform/bundledpython/python.exe"
 GCLOUD_BIN="/c/Program Files (x86)/Google/Cloud SDK/google-cloud-sdk/bin"
 WINGET_BIN="/c/Users/Wilson/AppData/Local/Microsoft/WinGet/Links"
-DOCKER_BIN="/c/Program Files/Docker/Docker/resources/bin"
-export PATH="$PATH:$GCLOUD_BIN:$WINGET_BIN:$DOCKER_BIN"
+export PATH="$PATH:$GCLOUD_BIN:$WINGET_BIN"
 
-# ── Configurações ─────────────────────────────────────────────
+# ── Configurações ──────────────────────────────────────────────
 CREDS="credentials.json"
 REGION="us-central1"
-CLUSTER="devops-challenge-cluster"
-NAMESPACE="devops-challenge"
+ZONE="us-central1-a"
 REPO="devops-challenge"
+VM_NAME="devops-challenge-vm"
 GITHUB_REPO="wilsongomes345/to-brasil"
 
 # ── Cores ──────────────────────────────────────────────────────
@@ -31,7 +30,7 @@ die()  { echo -e "${R}  ✘ ERRO: $1${N}"; exit 1; }
 # ── Banner ─────────────────────────────────────────────────────
 echo -e "${B}"
 echo "  ╔══════════════════════════════════════════╗"
-echo "  ║    DevOps Challenge — Setup GCP/GKE      ║"
+echo "  ║    DevOps Challenge — Setup GCP/GCE      ║"
 echo "  ╚══════════════════════════════════════════╝"
 echo -e "${N}"
 
@@ -40,8 +39,7 @@ step "Verificando pré-requisitos..."
 [[ -f "$CREDS" ]]            || die "$CREDS não encontrado na pasta atual"
 command -v gcloud    &>/dev/null || die "gcloud não instalado"
 command -v terraform &>/dev/null || die "terraform não instalado"
-command -v kubectl   &>/dev/null || die "kubectl não instalado"
-ok "Todas as ferramentas disponíveis"
+ok "Ferramentas OK"
 
 # ── Extrai dados do credentials.json ──────────────────────────
 PROJECT_ID=$(grep -o '"project_id": *"[^"]*"' "$CREDS" | grep -o '[^"]*"$' | tr -d '"')
@@ -52,159 +50,110 @@ echo ""
 echo "  ┌─────────────────────────────────────────────────────┐"
 printf  "  │  Projeto  : %-40s│\n" "$PROJECT_ID"
 printf  "  │  Região   : %-40s│\n" "$REGION"
-printf  "  │  Cluster  : %-40s│\n" "$CLUSTER"
+printf  "  │  VM       : %-40s│\n" "$VM_NAME"
 printf  "  │  Registry : %-40s│\n" "$REGISTRY"
-printf  "  │  SA       : %-40s│\n" "$SA_EMAIL"
 echo    "  └─────────────────────────────────────────────────────┘"
 echo ""
 
-# ── 1. Autenticação GCP ───────────────────────────────────────
-step "1/6 — Autenticando no GCP..."
+# ── Protege credentials do git ─────────────────────────────────
+grep -q "credentials.json" .gitignore 2>/dev/null || echo "credentials.json" >> .gitignore
+
+# ── 1. Autenticação ────────────────────────────────────────────
+step "1/5 — Autenticando no GCP..."
 export GOOGLE_APPLICATION_CREDENTIALS="$(realpath "$CREDS")"
 gcloud auth activate-service-account --key-file="$CREDS" --quiet
 gcloud config set project "$PROJECT_ID" --quiet
-gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
 ok "Autenticado como $SA_EMAIL"
 
-# ── 2a. Habilita APIs necessárias via gcloud ──────────────────
-step "2/6 — Habilitando APIs do GCP (necessário para o Terraform)..."
+# ── 2. Habilita APIs + Terraform ──────────────────────────────
+step "2/5 — Habilitando APIs e provisionando infraestrutura..."
 gcloud services enable \
   cloudresourcemanager.googleapis.com \
-  iam.googleapis.com \
-  container.googleapis.com \
+  compute.googleapis.com \
   artifactregistry.googleapis.com \
   cloudbuild.googleapis.com \
-  compute.googleapis.com \
   --project="$PROJECT_ID" --quiet
 ok "APIs habilitadas"
 
-# ── 2b. Terraform — GKE + Artifact Registry ───────────────────
-step "  Provisionando infraestrutura (GKE Autopilot + Artifact Registry)..."
 cd infra/terraform
-
 cat > terraform.tfvars << EOF
 project_id   = "$PROJECT_ID"
 region       = "$REGION"
-cluster_name = "$CLUSTER"
+zone         = "$ZONE"
 repo_name    = "$REPO"
 EOF
 
-terraform init   -upgrade -input=false -no-color 2>&1 | grep -E "Terraform|provider|Initialized"
-terraform apply  -auto-approve -input=false -no-color 2>&1 | grep -E "Apply|created|cluster|registry|error" || true
+terraform init -upgrade -input=false -no-color 2>&1 | grep -E "Initialized|provider|Terraform"
+terraform apply -auto-approve -input=false -no-color 2>&1 | \
+  grep -E "Apply complete|created|vm_ip|error|Error" || true
 cd ../..
-ok "Cluster GKE e Artifact Registry prontos"
 
-# ── 3. Instala gke-gcloud-auth-plugin e configura kubectl ─────
-step "3/6 — Configurando kubectl para o cluster GKE..."
+VM_IP=$(cd infra/terraform && terraform output -raw vm_ip 2>/dev/null || echo "")
+ok "Infraestrutura pronta — VM IP: $VM_IP"
 
-# Plugin obrigatório para autenticação kubectl ↔ GKE
-gcloud components install gke-gcloud-auth-plugin --quiet 2>/dev/null || true
-export USE_GKE_GCLOUD_AUTH_PLUGIN=True
+# ── 3. Build e push das imagens ────────────────────────────────
+step "3/5 — Build e push das imagens (Cloud Build)..."
+gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
 
-# Aguarda cluster ficar RUNNING antes de pegar credenciais
-echo -n "  Aguardando cluster ficar RUNNING"
-for i in {1..30}; do
-  STATUS=$(gcloud container clusters describe "$CLUSTER" \
-    --region "$REGION" --project "$PROJECT_ID" \
-    --format="value(status)" 2>/dev/null || echo "NOT_FOUND")
-  [[ "$STATUS" == "RUNNING" ]] && echo " OK!" && break
+echo "  → App 1 (Python/FastAPI)..."
+gcloud builds submit ./app1 --tag "$REGISTRY/app1:latest" --project "$PROJECT_ID" --quiet
+ok "app1 enviada"
+
+echo "  → App 2 (Node.js/Express)..."
+gcloud builds submit ./app2 --tag "$REGISTRY/app2:latest" --project "$PROJECT_ID" --quiet
+ok "app2 enviada"
+
+# ── 4. Aguarda VM e faz primeiro deploy ───────────────────────
+step "4/5 — Aguardando VM inicializar e fazendo deploy..."
+echo -n "  Aguardando Docker estar pronto na VM"
+for i in {1..20}; do
+  READY=$(gcloud compute ssh "$VM_NAME" --zone="$ZONE" --project="$PROJECT_ID" \
+    --quiet --ssh-flag="-o StrictHostKeyChecking=no" \
+    --command="docker info &>/dev/null && echo yes || echo no" 2>/dev/null || echo "no")
+  [[ "$READY" == "yes" ]] && echo " OK!" && break
   printf "."
   sleep 15
-  [[ $i -eq 30 ]] && echo "" && die "Cluster não ficou RUNNING em tempo hábil."
+  [[ $i -eq 20 ]] && echo "" && die "VM não ficou pronta. Verifique: gcloud compute ssh $VM_NAME --zone=$ZONE"
 done
 
-gcloud container clusters get-credentials "$CLUSTER" \
-  --region "$REGION" --project "$PROJECT_ID"
-ok "kubectl apontando para $CLUSTER"
+gcloud compute ssh "$VM_NAME" --zone="$ZONE" --project="$PROJECT_ID" \
+  --quiet --ssh-flag="-o StrictHostKeyChecking=no" \
+  --command="
+    set -e
+    cd /opt/app
+    git pull origin main
+    echo 'REGISTRY=$REGISTRY' > .env
+    gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
+    docker compose -f docker-compose.prod.yml pull
+    docker compose -f docker-compose.prod.yml up -d --remove-orphans
+    docker compose -f docker-compose.prod.yml ps
+  "
+ok "Aplicação rodando na VM"
 
-# ── 4. Build e push via Cloud Build (sem Docker local) ────────
-step "4/6 — Build e push das imagens via Google Cloud Build..."
-# Cloud Build roda na GCP — não precisa de Docker instalado localmente
-
-echo "  → Cloud Build: App 1 (Python/FastAPI)..."
-gcloud builds submit ./app1 \
-  --tag "$REGISTRY/app1:latest" \
-  --project "$PROJECT_ID" \
-  --quiet
-ok "app1 enviada para $REGISTRY/app1:latest"
-
-echo "  → Cloud Build: App 2 (Node.js/Express)..."
-gcloud builds submit ./app2 \
-  --tag "$REGISTRY/app2:latest" \
-  --project "$PROJECT_ID" \
-  --quiet
-ok "app2 enviada para $REGISTRY/app2:latest"
-
-# ── 5. Deploy no GKE ─────────────────────────────────────────
-step "5/6 — Aplicando manifests no Kubernetes..."
-
-# Namespace e ConfigMaps primeiro
-kubectl apply -f k8s/namespace.yaml
-kubectl apply -f k8s/nginx/
-
-# Apps: injeta a URL real do registry sem modificar os arquivos fonte
-sed "s|us-central1-docker.pkg.dev/PROJECT_ID/devops-challenge|$REGISTRY|g" \
-  k8s/app1/deployment.yaml | kubectl apply -f -
-kubectl apply -f k8s/app1/service.yaml
-kubectl apply -f k8s/app1/hpa.yaml
-
-sed "s|us-central1-docker.pkg.dev/PROJECT_ID/devops-challenge|$REGISTRY|g" \
-  k8s/app2/deployment.yaml | kubectl apply -f -
-kubectl apply -f k8s/app2/service.yaml
-kubectl apply -f k8s/app2/hpa.yaml
-
-# Observabilidade
-kubectl apply -f k8s/observability/prometheus/
-kubectl apply -f k8s/observability/grafana/
-ok "Todos os manifests aplicados"
-
-# Aguarda pods
-echo "  → Aguardando rollout dos pods..."
-kubectl rollout status deployment/app1  -n "$NAMESPACE" --timeout=180s
-kubectl rollout status deployment/app2  -n "$NAMESPACE" --timeout=180s
-kubectl rollout status deployment/nginx -n "$NAMESPACE" --timeout=180s
-ok "Todos os pods estão rodando"
-
-# ── 6. GitHub Secrets (CI/CD automático) ─────────────────────
-step "6/6 — Configurando GitHub Secrets para CI/CD..."
+# ── 5. GitHub Secrets (CI/CD automático) ─────────────────────
+step "5/5 — Configurando GitHub Secrets..."
 if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
-  gh secret set GCP_PROJECT_ID --body "$PROJECT_ID"   --repo "$GITHUB_REPO"
-  gh secret set GCP_CREDENTIALS < "$CREDS"             --repo "$GITHUB_REPO"
-  ok "Secrets GCP_PROJECT_ID e GCP_CREDENTIALS configurados no GitHub"
+  gh secret set GCP_PROJECT_ID --body "$PROJECT_ID" --repo "$GITHUB_REPO"
+  gh secret set GCP_CREDENTIALS < "$CREDS"           --repo "$GITHUB_REPO"
+  ok "Secrets configurados — CI/CD ativo no próximo push!"
 else
   warn "Configure manualmente em: https://github.com/$GITHUB_REPO/settings/secrets/actions"
   warn "  GCP_PROJECT_ID  → $PROJECT_ID"
-  warn "  GCP_CREDENTIALS → conteúdo completo do credentials.json"
+  warn "  GCP_CREDENTIALS → conteúdo completo do arquivo credentials.json"
 fi
 
 # ── URLs finais ───────────────────────────────────────────────
-echo ""
-echo -e "  ${B}Aguardando IP externo do LoadBalancer...${N}"
-NGINX_IP=""
-for i in {1..24}; do
-  NGINX_IP=$(kubectl get svc nginx -n "$NAMESPACE" \
-    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
-  [[ -n "$NGINX_IP" ]] && break
-  printf "  aguardando... (%d/24)\r" "$i"
-  sleep 10
-done
-
-PROM_IP=$(kubectl get svc prometheus -n "$NAMESPACE" \
-  -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "pendente")
-GRAF_IP=$(kubectl get svc grafana -n "$NAMESPACE" \
-  -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "pendente")
-
 echo ""
 echo -e "${G}"
 echo "  ╔═══════════════════════════════════════════════════════════╗"
 echo "  ║              ✔  Deploy concluído com sucesso!             ║"
 echo "  ╠═══════════════════════════════════════════════════════════╣"
-printf "  ║  App 1 (cache 10s) texto   → http://%-22s║\n" "$NGINX_IP/app1/text"
-printf "  ║  App 1 (cache 10s) horário → http://%-22s║\n" "$NGINX_IP/app1/time"
-printf "  ║  App 2 (cache 60s) texto   → http://%-22s║\n" "$NGINX_IP/app2/text"
-printf "  ║  App 2 (cache 60s) horário → http://%-22s║\n" "$NGINX_IP/app2/time"
+printf "  ║  App 1 texto   (cache 10s) → http://%-22s║\n" "$VM_IP/app1/text"
+printf "  ║  App 1 horário (cache 10s) → http://%-22s║\n" "$VM_IP/app1/time"
+printf "  ║  App 2 texto   (cache 60s) → http://%-22s║\n" "$VM_IP/app2/text"
+printf "  ║  App 2 horário (cache 60s) → http://%-22s║\n" "$VM_IP/app2/time"
 echo  "  ╠═══════════════════════════════════════════════════════════╣"
-printf "  ║  Prometheus → http://%-39s║\n" "$PROM_IP:9090"
-printf "  ║  Grafana    → http://%-39s║\n" "$GRAF_IP:3000  (admin/admin)"
+printf "  ║  Prometheus → http://%-39s║\n" "$VM_IP:9090"
+printf "  ║  Grafana    → http://%-39s║\n" "$VM_IP:3000  (admin/admin)"
 echo  "  ╚═══════════════════════════════════════════════════════════╝"
 echo -e "${N}"
