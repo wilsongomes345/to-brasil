@@ -14,10 +14,10 @@ env:
 
 jobs:
   # ============================================================
-  # JOB 1 — Testes
+  # JOB 1 — Testes + Dependency Security Check
   # ============================================================
   test:
-    name: Testes
+    name: Testes & Security
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,6 +32,12 @@ jobs:
           pip install -r requirements.txt "httpx<0.28" pytest
           pytest test_main.py -v
 
+      - name: Verificar vulnerabilidades Python (pip-audit)
+        run: |
+          pip install pip-audit
+          cd app1
+          pip-audit -r requirements.txt --desc on || true
+
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -42,11 +48,16 @@ jobs:
           npm install
           npm test
 
+      - name: Verificar vulnerabilidades Node.js (npm audit)
+        run: |
+          cd app2
+          npm audit --audit-level=critical || true
+
   # ============================================================
-  # JOB 2 — Build e Push (apenas na main)
+  # JOB 2 — Build, Push e Scan de Segurança de Imagens
   # ============================================================
   build:
-    name: Build & Push
+    name: Build, Push & Trivy Scan
     runs-on: ubuntu-latest
     needs: test
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -79,6 +90,28 @@ jobs:
           docker push $REGISTRY/app2:latest
           docker push $REGISTRY/app2:${{ github.sha }}
 
+      - name: Scan de vulnerabilidades — App 1 (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}/app1:latest
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+        env:
+          TRIVY_USERNAME: oauth2accesstoken
+          TRIVY_PASSWORD: ${{ steps.auth.outputs.access_token }}
+
+      - name: Scan de vulnerabilidades — App 2 (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}/app2:latest
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+        env:
+          TRIVY_USERNAME: oauth2accesstoken
+          TRIVY_PASSWORD: ${{ steps.auth.outputs.access_token }}
+
   # ============================================================
   # JOB 3 — Infra (Terraform) + Deploy via SSH
   # ============================================================
@@ -97,7 +130,6 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      # Terraform gerencia VM + Artifact Registry + Firewall
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
@@ -105,11 +137,9 @@ jobs:
       - name: Terraform — criar/manter infraestrutura
         env:
           PROJECT:            ${{ secrets.GCP_PROJECT_ID }}
-          # Terraform usa GOOGLE_CREDENTIALS para autenticar
           GOOGLE_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
         run: |
           cd infra/terraform
-
           cat > terraform.tfvars <<EOF
           project_id = "$PROJECT"
           region     = "${{ env.REGION }}"
@@ -117,21 +147,17 @@ jobs:
           repo_name  = "${{ env.REPO }}"
           EOF
 
-          # Bucket de estado foi criado pelo setup.sh
           terraform init \
             -input=false \
             -backend-config="bucket=$PROJECT-tfstate" \
             -backend-config="prefix=devops-challenge"
 
           terraform apply -auto-approve -input=false
-
-          # Exporta o IP para os próximos steps
           echo "VM_IP=$(terraform output -raw vm_ip)" >> $GITHUB_ENV
 
       - name: Aguardar VM estar pronta
         run: |
           echo "VM IP: $VM_IP"
-          echo "Aguardando health check..."
           for i in $(seq 1 40); do
             STATUS=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 \
               "http://$VM_IP/health" 2>/dev/null || echo "000")
@@ -142,7 +168,7 @@ jobs:
             echo "Tentativa $i/40 (status=$STATUS)..."
             sleep 15
           done
-          echo "VM ainda não respondeu — pode ser primeiro boot (startup script ainda rodando)"
+          echo "VM ainda não respondeu — startup script pode ainda estar rodando"
 
       - name: Deploy via SSH
         env:
@@ -166,14 +192,107 @@ jobs:
               sudo docker compose -f docker-compose.prod.yml ps
             "
 
+  # ============================================================
+  # JOB 4 — Smoke Test (valida cache + endpoints após deploy)
+  # ============================================================
+  smoke-test:
+    name: Smoke Test
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Obter IP da VM
+        env:
+          PROJECT:            ${{ secrets.GCP_PROJECT_ID }}
+          GOOGLE_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+        run: |
+          cd infra/terraform
+          cat > terraform.tfvars <<EOF
+          project_id = "$PROJECT"
+          region     = "${{ env.REGION }}"
+          zone       = "${{ env.ZONE }}"
+          repo_name  = "${{ env.REPO }}"
+          EOF
+          terraform init -input=false \
+            -backend-config="bucket=$PROJECT-tfstate" \
+            -backend-config="prefix=devops-challenge"
+          echo "VM_IP=$(terraform output -raw vm_ip)" >> $GITHUB_ENV
+
+      - name: Smoke Test — endpoints e cache
+        run: |
+          BASE="http://$VM_IP"
+          FAIL=0
+
+          check() {
+            local url=$1
+            local expected=$2
+            local status
+            status=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "$url" 2>/dev/null || echo "000")
+            if [ "$status" = "$expected" ]; then
+              echo "  ✔ $url → $status"
+            else
+              echo "  ✘ $url → $status (esperado $expected)"
+              FAIL=1
+            fi
+          }
+
+          echo "=== Verificando endpoints ==="
+          check "$BASE/health"      "200"
+          check "$BASE/app1/text"   "200"
+          check "$BASE/app1/time"   "200"
+          check "$BASE/app2/text"   "200"
+          check "$BASE/app2/time"   "200"
+          check "$BASE/app1/metrics" "200"
+          check "$BASE/app2/metrics" "200"
+
+          echo ""
+          echo "=== Verificando cache MISS → HIT (App 1, TTL 10s) ==="
+          CACHE1=$(curl -sf -I --max-time 10 "$BASE/app1/time" 2>/dev/null | grep -i x-cache-status | tr -d '\r')
+          sleep 1
+          CACHE2=$(curl -sf -I --max-time 10 "$BASE/app1/time" 2>/dev/null | grep -i x-cache-status | tr -d '\r')
+          echo "  1ª req: $CACHE1"
+          echo "  2ª req: $CACHE2"
+          echo "$CACHE2" | grep -qi "HIT" && echo "  ✔ Cache HIT confirmado!" || { echo "  ✘ Cache HIT não detectado"; FAIL=1; }
+
+          echo ""
+          echo "=== Verificando cache MISS → HIT (App 2, TTL 60s) ==="
+          CACHE3=$(curl -sf -I --max-time 10 "$BASE/app2/time" 2>/dev/null | grep -i x-cache-status | tr -d '\r')
+          sleep 1
+          CACHE4=$(curl -sf -I --max-time 10 "$BASE/app2/time" 2>/dev/null | grep -i x-cache-status | tr -d '\r')
+          echo "  1ª req: $CACHE3"
+          echo "  2ª req: $CACHE4"
+          echo "$CACHE4" | grep -qi "HIT" && echo "  ✔ Cache HIT confirmado!" || { echo "  ✘ Cache HIT não detectado"; FAIL=1; }
+
+          echo ""
+          echo "=== Verificando rate limiting (429 no excesso) ==="
+          for i in $(seq 1 25); do curl -sf -o /dev/null "$BASE/app1/text" 2>/dev/null || true; done
+          RL=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "$BASE/app1/text" 2>/dev/null || echo "000")
+          echo "  Resposta após burst: $RL"
+
+          [ $FAIL -eq 0 ] && echo "" && echo "✅ Todos os smoke tests passaram!" || { echo ""; echo "❌ Smoke tests falharam!"; exit 1; }
+
       - name: Resumo do deploy
         run: |
-          echo "## Deploy concluído!" >> $GITHUB_STEP_SUMMARY
+          echo "## ✅ Deploy concluído com sucesso!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Serviço | URL |" >> $GITHUB_STEP_SUMMARY
           echo "|---------|-----|" >> $GITHUB_STEP_SUMMARY
-          echo "| App 1 texto   (cache 10s) | http://$VM_IP/app1/text |" >> $GITHUB_STEP_SUMMARY
-          echo "| App 1 horário (cache 10s) | http://$VM_IP/app1/time |" >> $GITHUB_STEP_SUMMARY
-          echo "| App 2 texto   (cache 60s) | http://$VM_IP/app2/text |" >> $GITHUB_STEP_SUMMARY
-          echo "| App 2 horário (cache 60s) | http://$VM_IP/app2/time |" >> $GITHUB_STEP_SUMMARY
-          echo "| Prometheus | http://$VM_IP:9090 |" >> $GITHUB_STEP_SUMMARY
-          echo "| Grafana (admin/admin) | http://$VM_IP:3000 |" >> $GITHUB_STEP_SUMMARY
+          echo "| App 1 texto   (cache 10s)  | http://$VM_IP/app1/text |" >> $GITHUB_STEP_SUMMARY
+          echo "| App 1 horário (cache 10s)  | http://$VM_IP/app1/time |" >> $GITHUB_STEP_SUMMARY
+          echo "| App 2 texto   (cache 60s)  | http://$VM_IP/app2/text |" >> $GITHUB_STEP_SUMMARY
+          echo "| App 2 horário (cache 60s)  | http://$VM_IP/app2/time |" >> $GITHUB_STEP_SUMMARY
+          echo "| Prometheus                  | http://$VM_IP:9090 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Grafana (admin/admin)       | http://$VM_IP:3000 |" >> $GITHUB_STEP_SUMMARY

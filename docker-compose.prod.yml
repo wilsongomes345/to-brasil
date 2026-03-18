@@ -1,13 +1,7 @@
 # =============================================================
 # docker-compose.prod.yml — Produção (GCP)
 # Usa imagens pré-construídas do Artifact Registry.
-#
-# Variável obrigatória antes de rodar:
-#   export REGISTRY=<region>-docker.pkg.dev/<project>/<repo>
-#
-# Exemplo:
-#   export REGISTRY=us-central1-docker.pkg.dev/meu-projeto/devops-challenge
-#   docker compose -f docker-compose.prod.yml up -d
+# Variável obrigatória: REGISTRY=<region>-docker.pkg.dev/<project>/<repo>
 # =============================================================
 
 services:
@@ -19,8 +13,15 @@ services:
     image: ${REGISTRY}/app1:latest
     container_name: app1
     restart: unless-stopped
+    user: "appuser"
     networks:
       - backend
+      - monitoring
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -36,8 +37,15 @@ services:
     image: ${REGISTRY}/app2:latest
     container_name: app2
     restart: unless-stopped
+    user: "node"
     networks:
       - backend
+      - monitoring
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
       interval: 30s
@@ -46,7 +54,7 @@ services:
       start_period: 15s
 
   # --------------------------------------------------------
-  # Nginx — Reverse Proxy + Cache
+  # Nginx — Reverse Proxy + Cache + Rate Limiting
   # --------------------------------------------------------
   nginx:
     image: nginx:alpine
@@ -65,6 +73,11 @@ services:
     networks:
       - backend
       - monitoring
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost/health"]
       interval: 30s
@@ -83,6 +96,11 @@ services:
       - nginx
     networks:
       - monitoring
+    deploy:
+      resources:
+        limits:
+          cpus: "0.1"
+          memory: 64M
 
   # --------------------------------------------------------
   # Prometheus
@@ -100,11 +118,17 @@ services:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
       - "--web.enable-lifecycle"
+      - "--storage.tsdb.retention.time=7d"
     networks:
       - monitoring
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
 
   # --------------------------------------------------------
-  # Grafana
+  # Grafana — Dashboard auto-provisionado
   # --------------------------------------------------------
   grafana:
     image: grafana/grafana:latest
@@ -113,8 +137,9 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
     volumes:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana_data:/var/lib/grafana
@@ -122,6 +147,11 @@ services:
       - prometheus
     networks:
       - monitoring
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
 
 networks:
   backend:

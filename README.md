@@ -1,41 +1,76 @@
+[![CI/CD](https://github.com/wilsongomes345/to-brasil/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/wilsongomes345/to-brasil/actions/workflows/ci-cd.yml)
+
 # Desafio DevOps
 
-Dois serviços web em linguagens diferentes, com cache via **Nginx Proxy Cache**, observabilidade com **Prometheus + Grafana** — rodando local com Docker Compose e em produção na **Google Cloud Platform (GCE + Artifact Registry + CI/CD)**.
+Dois serviços web em linguagens diferentes, com cache via **Nginx Proxy Cache**, observabilidade com **Prometheus + Grafana** e segurança com **Trivy + pip-audit + npm audit + Dependabot** — rodando local com Docker Compose e em produção na **Google Cloud Platform (GCE + Artifact Registry)**.
 
 ## Estrutura
 
 ```
 .
 ├── app1/                        # Python 3.12 / FastAPI
-│   ├── main.py
-│   ├── test_main.py
+│   ├── main.py                  # API + /metrics (Prometheus)
+│   ├── test_main.py             # Testes pytest
 │   ├── requirements.txt
-│   └── Dockerfile
+│   └── Dockerfile               # Usuário não-root
 ├── app2/                        # Node.js 20 / Express
-│   ├── index.js
-│   ├── app2.test.js
+│   ├── index.js                 # API + /metrics (prom-client)
+│   ├── app2.test.js             # Testes node:test nativos
 │   ├── package.json
-│   └── Dockerfile
+│   └── Dockerfile               # Usuário não-root (node)
 ├── nginx/
-│   └── nginx.conf               # Reverse proxy + cache zones (10s / 60s)
+│   └── nginx.conf               # Reverse proxy + cache (10s/60s) + rate limiting
 ├── observability/
 │   ├── prometheus/
-│   │   └── prometheus.yml       # Scrape configs
+│   │   └── prometheus.yml       # Scrape: nginx-exporter + app1 + app2
 │   └── grafana/
-│       └── provisioning/        # Datasource + dashboard auto-provisionados
+│       └── provisioning/        # Datasource + dashboards auto-provisionados
+│           ├── datasources/
+│           └── dashboards/
+│               ├── nginx-overview.json   # Dashboard Nginx
+│               └── app-metrics.json      # Dashboard App1 + App2
 ├── infra/
 │   ├── terraform/               # IaC — GCE VM + Artifact Registry + Firewall
 │   └── scripts/
 │       └── startup.sh           # Bootstrap da VM (instala Docker, sobe stack)
 ├── .github/
+│   ├── dependabot.yml           # Atualização automática de dependências
 │   └── workflows/
-│       └── ci-cd.yml            # Pipeline: test → build → terraform → deploy
+│       └── ci-cd.yml            # Pipeline: test+security → build+trivy → deploy → smoke-test
 ├── docs/
 │   └── architecture.md          # Diagrama de arquitetura (Mermaid)
-├── docker-compose.yml           # Stack local (build from source)
-├── docker-compose.prod.yml      # Stack produção (imagens do Artifact Registry)
+├── docker-compose.yml           # Stack local
+├── docker-compose.prod.yml      # Stack produção (resource limits + não-root)
 ├── setup.sh                     # Setup completo GCP com 1 comando
 └── Makefile
+```
+
+---
+
+## Pipeline CI/CD
+
+```
+push main
+    │
+    ▼
+┌─────────────────────────┐
+│  1. Testes & Security   │  pytest + node:test + pip-audit + npm audit
+└────────────┬────────────┘
+             │
+    ▼
+┌─────────────────────────┐
+│  2. Build & Trivy Scan  │  docker build + push + scan CRITICAL/HIGH CVEs
+└────────────┬────────────┘
+             │
+    ▼
+┌─────────────────────────┐
+│  3. Deploy (Terraform)  │  cria/mantém VM + SSH deploy
+└────────────┬────────────┘
+             │
+    ▼
+┌─────────────────────────┐
+│  4. Smoke Test          │  valida endpoints + cache MISS→HIT + rate limit
+└─────────────────────────┘
 ```
 
 ---
@@ -85,7 +120,7 @@ App 2 tem o mesmo comportamento com janela de **60 segundos**.
 
 - [gcloud CLI](https://cloud.google.com/sdk/docs/install) instalado
 - [Terraform](https://developer.hashicorp.com/terraform/downloads) >= 1.5
-- `credentials.json` de uma Service Account com role **Editor** na pasta do projeto
+- `credentials.json` de uma Service Account com role **Editor**
 
 ### Executar
 
@@ -96,42 +131,52 @@ bash setup.sh
 O script automaticamente:
 1. Autentica no GCP com a Service Account
 2. Habilita as APIs necessárias
-3. Cria o bucket GCS para estado do Terraform
+3. Cria bucket GCS para estado Terraform (compartilhado com CI/CD)
 4. Provisiona com Terraform: VM (`e2-medium`), Artifact Registry e Firewall
 5. Faz build e push das imagens via Cloud Build (sem Docker Desktop)
 6. Aguarda a VM inicializar e a stack subir (~5–10 min)
 7. Exibe todas as URLs de acesso
 
-### URLs de produção (após setup)
+---
 
-| Serviço | URL |
-|---------|-----|
-| App 1 texto   (cache 10s)  | `http://<VM_IP>/app1/text` |
-| App 1 horário (cache 10s)  | `http://<VM_IP>/app1/time` |
-| App 2 texto   (cache 60s)  | `http://<VM_IP>/app2/text` |
-| App 2 horário (cache 60s)  | `http://<VM_IP>/app2/time` |
-| Prometheus                  | `http://<VM_IP>:9090`      |
-| Grafana (admin/admin)       | `http://<VM_IP>:3000`      |
+## Observabilidade
+
+Grafana abre com **dois dashboards pré-configurados**:
+
+| Dashboard | Métricas |
+|-----------|----------|
+| **Nginx Overview** | Conexões ativas, request rate, cache HIT/MISS |
+| **App Metrics** | Request rate, latência p50/p95/p99, taxa de erros — por app |
+
+Prometheus scraping:
+- `nginx-exporter:9113` — métricas do Nginx
+- `app1:8000/metrics` — métricas FastAPI (requests, latência)
+- `app2:3001/metrics` — métricas Express (requests, latência)
 
 ---
 
-## CI/CD (GitHub Actions)
+## Segurança
 
-A cada push na `main`, o pipeline executa automaticamente:
+| Camada | Ferramenta | Frequência |
+|--------|------------|------------|
+| Vulnerabilidades Python | `pip-audit` | A cada push |
+| Vulnerabilidades Node.js | `npm audit` | A cada push |
+| CVEs nas imagens Docker | `Trivy` (CRITICAL/HIGH) | A cada push |
+| Atualização automática | `Dependabot` | Toda semana |
+| Containers não-root | `USER appuser` / `USER node` | Sempre |
+| Resource limits | `deploy.resources.limits` | Sempre |
+| Rate limiting | Nginx `limit_req` (10 req/s) | Sempre |
 
-1. **Testes** — `pytest` (App 1) + `node --test` (App 2)
-2. **Build & Push** — imagens Docker enviadas ao Artifact Registry com tags `latest` e `<git-sha>`
-3. **Infraestrutura** — Terraform garante que a VM existe (cria se necessário)
-4. **Deploy** — SSH na VM GCE, pull das novas imagens e restart do Compose
+---
 
-### Secrets necessários no repositório
+## CI/CD — Secrets necessários
+
+Configure em: **Settings → Secrets and variables → Actions → New repository secret**
 
 | Secret | Valor |
 |--------|-------|
 | `GCP_PROJECT_ID` | ID do projeto GCP |
 | `GCP_CREDENTIALS` | Conteúdo completo do `credentials.json` |
-
-> Configure em: **Settings → Secrets and variables → Actions → New repository secret**
 
 ---
 
