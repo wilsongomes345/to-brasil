@@ -69,6 +69,7 @@ jobs:
         id: auth
         with:
           credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+          token_format: access_token
 
       - uses: google-github-actions/setup-gcloud@v2
 
