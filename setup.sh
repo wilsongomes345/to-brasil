@@ -6,7 +6,7 @@
 # =============================================================
 set -euo pipefail
 
-# ── PATH: ferramentas instaladas no Windows via winget/Google SDK ─
+# ── PATH: ferramentas instaladas no Windows via Google SDK ────
 export CLOUDSDK_PYTHON="/c/Program Files (x86)/Google/Cloud SDK/google-cloud-sdk/platform/bundledpython/python.exe"
 GCLOUD_BIN="/c/Program Files (x86)/Google/Cloud SDK/google-cloud-sdk/bin"
 WINGET_BIN="/c/Users/Wilson/AppData/Local/Microsoft/WinGet/Links"
@@ -59,14 +59,14 @@ echo ""
 grep -q "credentials.json" .gitignore 2>/dev/null || echo "credentials.json" >> .gitignore
 
 # ── 1. Autenticação ────────────────────────────────────────────
-step "1/5 — Autenticando no GCP..."
+step "1/4 — Autenticando no GCP..."
 export GOOGLE_APPLICATION_CREDENTIALS="$(realpath "$CREDS")"
 gcloud auth activate-service-account --key-file="$CREDS" --quiet
 gcloud config set project "$PROJECT_ID" --quiet
 ok "Autenticado como $SA_EMAIL"
 
 # ── 2. Habilita APIs + Terraform ──────────────────────────────
-step "2/5 — Habilitando APIs e provisionando infraestrutura..."
+step "2/4 — Habilitando APIs e provisionando infraestrutura..."
 gcloud services enable \
   cloudresourcemanager.googleapis.com \
   compute.googleapis.com \
@@ -92,7 +92,7 @@ VM_IP=$(cd infra/terraform && terraform output -raw vm_ip 2>/dev/null || echo ""
 ok "Infraestrutura pronta — VM IP: $VM_IP"
 
 # ── 3. Build e push das imagens ────────────────────────────────
-step "3/5 — Build e push das imagens (Cloud Build)..."
+step "3/4 — Build e push das imagens (Cloud Build)..."
 gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
 
 echo "  → App 1 (Python/FastAPI)..."
@@ -103,37 +103,27 @@ echo "  → App 2 (Node.js/Express)..."
 gcloud builds submit ./app2 --tag "$REGISTRY/app2:latest" --project "$PROJECT_ID" --quiet
 ok "app2 enviada"
 
-# ── 4. Aguarda VM e faz primeiro deploy ───────────────────────
-step "4/5 — Aguardando VM inicializar e fazendo deploy..."
+# ── 4. Aguarda a stack subir na VM (via health check HTTP) ─────
+step "4/4 — Aguardando stack inicializar na VM..."
+warn "A VM instalará Docker e subirá os containers automaticamente (~8-10 min)"
+echo -n "  Verificando "
 
-# Configura SSH nativo (evita plink no Windows)
-gcloud compute config-ssh --project="$PROJECT_ID" --quiet 2>/dev/null
-SSH_HOST="$VM_NAME.$ZONE.$PROJECT_ID"
-
-echo -n "  Aguardando Docker estar pronto na VM"
-for i in {1..20}; do
-  READY=$(ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10 \
-    "$SSH_HOST" "sudo docker info &>/dev/null && echo yes || echo no" 2>/dev/null || echo "no")
-  [[ "$READY" == "yes" ]] && echo " OK!" && break
+for i in $(seq 1 40); do
+  STATUS=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://$VM_IP/health" 2>/dev/null || echo "000")
+  if [[ "$STATUS" == "200" ]]; then
+    echo " OK!"
+    break
+  fi
   printf "."
   sleep 15
-  [[ $i -eq 20 ]] && echo "" && die "VM não ficou pronta. Verifique: ssh $SSH_HOST"
+  if [[ $i -eq 40 ]]; then
+    echo ""
+    warn "Timeout esperando a VM. A stack pode ainda estar iniciando."
+    warn "Verifique o log da VM com: gcloud compute ssh $VM_NAME --zone=$ZONE --command='sudo journalctl -u google-startup-scripts -f'"
+  fi
 done
 
-ssh -o StrictHostKeyChecking=no "$SSH_HOST" "sudo bash -s" << DEPLOY
-  set -e
-  cd /opt/app
-  git pull origin main
-  echo 'REGISTRY=$REGISTRY' > .env
-  gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
-  docker compose -f docker-compose.prod.yml pull
-  docker compose -f docker-compose.prod.yml up -d --remove-orphans
-  docker compose -f docker-compose.prod.yml ps
-DEPLOY
-ok "Aplicação rodando na VM"
-
-# ── 5. GitHub Secrets (CI/CD automático) ─────────────────────
-step "5/5 — Configurando GitHub Secrets..."
+# ── GitHub Secrets (CI/CD automático) ─────────────────────────
 if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
   gh secret set GCP_PROJECT_ID --body "$PROJECT_ID" --repo "$GITHUB_REPO"
   gh secret set GCP_CREDENTIALS < "$CREDS"           --repo "$GITHUB_REPO"
