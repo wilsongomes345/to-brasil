@@ -65,7 +65,10 @@ test('GET /time retorna horário ISO 8601 válido', async () => {
   assert.ok(!isNaN(parsed.getTime()), 'time deve ser uma data válida');
 });
 
-// Teardown: fecha servidor após todos os testes (libera o processo)
+// Teardown: fecha servidor e todas as conexões (libera o processo)
 after(() => {
-  if (server) server.close();
+  if (server) {
+    server.closeAllConnections?.(); // Node 18.2+ — fecha keep-alive connections
+    server.close();
+  }
 });

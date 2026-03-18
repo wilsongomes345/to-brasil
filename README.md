@@ -1,37 +1,40 @@
-# Desafio DevOps 2025
+# Desafio DevOps
 
-Dois serviços web em linguagens diferentes, com cache via Nginx Proxy Cache, observabilidade com Prometheus + Grafana — rodando local com Docker Compose e em produção na **Google Cloud Platform (GCE + Artifact Registry)**.
+Dois serviços web em linguagens diferentes, com cache via **Nginx Proxy Cache**, observabilidade com **Prometheus + Grafana** — rodando local com Docker Compose e em produção na **Google Cloud Platform (GCE + Artifact Registry + CI/CD)**.
 
 ## Estrutura
 
 ```
-desafio/
+.
 ├── app1/                        # Python 3.12 / FastAPI
+│   ├── main.py
+│   ├── test_main.py
+│   ├── requirements.txt
+│   └── Dockerfile
 ├── app2/                        # Node.js 20 / Express
+│   ├── index.js
+│   ├── app2.test.js
+│   ├── package.json
+│   └── Dockerfile
 ├── nginx/
-│   └── nginx.conf               # Reverse proxy + cache zones
+│   └── nginx.conf               # Reverse proxy + cache zones (10s / 60s)
 ├── observability/
 │   ├── prometheus/
-│   │   └── prometheus.yml
+│   │   └── prometheus.yml       # Scrape configs
 │   └── grafana/
-│       └── provisioning/
-│           └── datasources/
+│       └── provisioning/        # Datasource + dashboard auto-provisionados
 ├── infra/
-│   ├── terraform/               # IaC — provisiona GCE + Artifact Registry
-│   │   ├── main.tf
-│   │   ├── variables.tf
-│   │   ├── outputs.tf
-│   │   └── terraform.tfvars.example
+│   ├── terraform/               # IaC — GCE VM + Artifact Registry + Firewall
 │   └── scripts/
-│       └── startup.sh           # Script de inicialização da VM
+│       └── startup.sh           # Bootstrap da VM (instala Docker, sobe stack)
 ├── .github/
 │   └── workflows/
-│       └── ci-cd.yml            # Pipeline CI/CD (GitHub Actions)
+│       └── ci-cd.yml            # Pipeline: test → build → terraform → deploy
 ├── docs/
-│   └── architecture.md          # Diagrama + análise + pontos de melhoria
-├── docker-compose.yml           # Stack local
-├── docker-compose.prod.yml      # Stack de produção (usa imagens do Artifact Registry)
-├── deploy.sh                    # Deploy GCP com um comando
+│   └── architecture.md          # Diagrama de arquitetura (Mermaid)
+├── docker-compose.yml           # Stack local (build from source)
+├── docker-compose.prod.yml      # Stack produção (imagens do Artifact Registry)
+├── setup.sh                     # Setup completo GCP com 1 comando
 └── Makefile
 ```
 
@@ -41,161 +44,122 @@ desafio/
 
 ```bash
 docker compose up -d
-# ou
-make up
 ```
 
 Aguarde ~15s para todos os containers ficarem saudáveis.
 
----
+### Endpoints locais
 
-## Deploy na GCP
-
-### Pré-requisitos
-
-- [gcloud CLI](https://cloud.google.com/sdk/docs/install) instalado e autenticado
-- [Terraform](https://developer.hashicorp.com/terraform/downloads) >= 1.5
-- Docker instalado
-- Projeto GCP com a conta de testes ativa
-
-### 1. Autenticar e configurar o projeto
-
-```bash
-gcloud auth login
-gcloud config set project SEU_PROJECT_ID
-```
-
-### 2. Provisionar a infraestrutura (Terraform)
-
-```bash
-cd infra/terraform
-cp terraform.tfvars.example terraform.tfvars
-# Edite terraform.tfvars com seu project_id
-
-make gcp-init    # terraform init
-make gcp-plan    # visualiza o que será criado
-make gcp-apply   # cria VM + Artifact Registry + Firewall
-```
-
-O Terraform exibe os IPs e URLs ao final.
-
-### 3. Build, push e deploy das imagens
-
-```bash
-make gcp-deploy
-# ou diretamente:
-./deploy.sh
-```
-
-Esse único comando:
-1. Autentica o Docker no Artifact Registry
-2. Faz build e push da App 1 (Python/FastAPI)
-3. Faz build e push da App 2 (Node.js/Express)
-4. SSH na VM e sobe o `docker-compose.prod.yml`
-5. Exibe todas as URLs de acesso
-
-### 4. Verificar URLs em produção
-
-```bash
-make gcp-urls
-```
-
----
-
-## Endpoints
-
-### App 1 — Python / FastAPI (cache: **10 segundos**)
-
-| Método | URL | Descrição |
-|--------|-----|-----------|
-| GET | `/app1/text` | Texto fixo |
-| GET | `/app1/time` | Horário atual do servidor |
-
-### App 2 — Node.js / Express (cache: **1 minuto**)
-
-| Método | URL | Descrição |
-|--------|-----|-----------|
-| GET | `/app2/text` | Texto fixo |
-| GET | `/app2/time` | Horário atual do servidor |
-
-### Observabilidade
-
-| Serviço | Porta | Credenciais |
-|---------|-------|-------------|
-| Prometheus | `:9090` | — |
-| Grafana | `:3000` | admin / admin |
+| App | Rota | Cache |
+|-----|------|-------|
+| App 1 — Python/FastAPI | `http://localhost/app1/text` | 10s |
+| App 1 — Python/FastAPI | `http://localhost/app1/time` | 10s |
+| App 2 — Node.js/Express | `http://localhost/app2/text` | 60s |
+| App 2 — Node.js/Express | `http://localhost/app2/time` | 60s |
+| Prometheus | `http://localhost:9090` | — |
+| Grafana | `http://localhost:3000` | admin/admin |
 
 ---
 
 ## Verificando o Cache
 
-O header `X-Cache-Status` mostra se a resposta veio do cache:
+O header `X-Cache-Status` indica se a resposta veio do cache:
 
 ```bash
-# Primeira requisição — MISS (busca na app)
-curl -sI http://localhost/app1/time | grep X-Cache
+# 1ª requisição — MISS (resposta veio do servidor)
+curl -sI http://localhost/app1/time | grep X-Cache-Status
 # X-Cache-Status: MISS
 
-# Segunda requisição (dentro de 10s) — HIT (do cache)
-curl -sI http://localhost/app1/time | grep X-Cache
+# 2ª requisição (dentro de 10s) — HIT (do cache)
+curl -sI http://localhost/app1/time | grep X-Cache-Status
 # X-Cache-Status: HIT
 ```
 
-Para o App 2 o mesmo comportamento se aplica, com janela de **60 segundos**.
+App 2 tem o mesmo comportamento com janela de **60 segundos**.
 
 ---
 
-## Comandos Úteis
+## Deploy na GCP (1 comando)
 
-### Local
+### Pré-requisitos
 
-```bash
-make up       # Subir toda a stack localmente
-make down     # Derrubar
-make logs     # Logs em tempo real
-make ps       # Status dos containers
-make build    # Reconstruir imagens
-make clean    # Remover tudo, incluindo volumes
-```
+- [gcloud CLI](https://cloud.google.com/sdk/docs/install) instalado
+- [Terraform](https://developer.hashicorp.com/terraform/downloads) >= 1.5
+- `credentials.json` de uma Service Account com role **Editor** na pasta do projeto
 
-### GCP
+### Executar
 
 ```bash
-make gcp-init     # Inicializar Terraform
-make gcp-plan     # Ver plano de infraestrutura
-make gcp-apply    # Provisionar infraestrutura na GCP
-make gcp-deploy   # Build + push + deploy na VM
-make gcp-ssh      # SSH na VM de produção
-make gcp-logs     # Logs da aplicação na VM
-make gcp-ip       # IP externo da VM
-make gcp-urls     # Todos os endpoints em produção
-make gcp-destroy  # Destruir infraestrutura
+bash setup.sh
 ```
+
+O script automaticamente:
+1. Autentica no GCP com a Service Account
+2. Habilita as APIs necessárias
+3. Cria o bucket GCS para estado do Terraform
+4. Provisiona com Terraform: VM (`e2-medium`), Artifact Registry e Firewall
+5. Faz build e push das imagens via Cloud Build (sem Docker Desktop)
+6. Aguarda a VM inicializar e a stack subir (~5–10 min)
+7. Exibe todas as URLs de acesso
+
+### URLs de produção (após setup)
+
+| Serviço | URL |
+|---------|-----|
+| App 1 texto   (cache 10s)  | `http://<VM_IP>/app1/text` |
+| App 1 horário (cache 10s)  | `http://<VM_IP>/app1/time` |
+| App 2 texto   (cache 60s)  | `http://<VM_IP>/app2/text` |
+| App 2 horário (cache 60s)  | `http://<VM_IP>/app2/time` |
+| Prometheus                  | `http://<VM_IP>:9090`      |
+| Grafana (admin/admin)       | `http://<VM_IP>:3000`      |
 
 ---
 
 ## CI/CD (GitHub Actions)
 
-O pipeline `.github/workflows/ci-cd.yml` executa automaticamente a cada push na `main`:
+A cada push na `main`, o pipeline executa automaticamente:
 
-1. **Testes** — valida App 1 (pytest) e App 2 (Node.js)
-2. **Build & Push** — constrói as imagens e envia ao Artifact Registry com tags `latest` e `<git-sha>`
-3. **Deploy** — SSH na VM GCE, pull das novas imagens e restart do compose
+1. **Testes** — `pytest` (App 1) + `node --test` (App 2)
+2. **Build & Push** — imagens Docker enviadas ao Artifact Registry com tags `latest` e `<git-sha>`
+3. **Infraestrutura** — Terraform garante que a VM existe (cria se necessário)
+4. **Deploy** — SSH na VM GCE, pull das novas imagens e restart do Compose
 
-**Secrets necessários no GitHub:**
+### Secrets necessários no repositório
 
-| Secret | Descrição |
-|--------|-----------|
+| Secret | Valor |
+|--------|-------|
 | `GCP_PROJECT_ID` | ID do projeto GCP |
-| `GCP_CREDENTIALS` | JSON da Service Account com permissões de Artifact Registry e Compute |
+| `GCP_CREDENTIALS` | Conteúdo completo do `credentials.json` |
+
+> Configure em: **Settings → Secrets and variables → Actions → New repository secret**
+
+---
+
+## Rodando os Testes Localmente
+
+```bash
+# App 1 — Python
+cd app1 && pip install -r requirements.txt "httpx<0.28" pytest && pytest -v
+
+# App 2 — Node.js
+cd app2 && npm install && npm test
+```
+
+---
+
+## Comandos Make
+
+```bash
+make up       # Subir stack local
+make down     # Derrubar stack
+make logs     # Logs em tempo real
+make ps       # Status dos containers
+make test     # Rodar todos os testes
+make clean    # Remover containers e volumes
+```
 
 ---
 
 ## Arquitetura
 
-Ver [docs/architecture.md](docs/architecture.md) para:
-- Diagrama local (Docker Compose)
-- Diagrama de produção (GCP)
-- Fluxo de requisição com cache
-- Fluxo de atualização (CI/CD)
-- Análise e sugestões de melhoria
+Ver [docs/architecture.md](docs/architecture.md) para diagrama completo com fluxo de requisição, cache e CI/CD.
