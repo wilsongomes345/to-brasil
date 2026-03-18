@@ -2,7 +2,7 @@
 // Usa o test runner nativo do Node.js (>=18) — sem dependências extras
 'use strict';
 
-const { test } = require('node:test');
+const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 
@@ -65,7 +65,7 @@ test('GET /time retorna horário ISO 8601 válido', async () => {
   assert.ok(!isNaN(parsed.getTime()), 'time deve ser uma data válida');
 });
 
-// Teardown: fecha servidor após os testes
-process.on('exit', () => {
+// Teardown: fecha servidor após todos os testes (libera o processo)
+after(() => {
   if (server) server.close();
 });
