@@ -7,10 +7,10 @@ on:
     branches: [main]
 
 env:
-  REGION:   us-central1
-  ZONE:     us-central1-a
-  REPO:     devops-challenge
-  VM_NAME:  devops-challenge-vm
+  REGION:  us-central1
+  ZONE:    us-central1-a
+  REPO:    devops-challenge
+  VM_NAME: devops-challenge-vm
 
 jobs:
   # ============================================================
@@ -22,30 +22,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # App 1 — Python / FastAPI
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Instalar e testar App 1
+      - name: Testar App 1 (Python/FastAPI)
         run: |
           cd app1
           pip install -r requirements.txt "httpx<0.28" pytest
           pytest test_main.py -v
 
-      # App 2 — Node.js / Express
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Instalar e testar App 2
+      - name: Testar App 2 (Node.js/Express)
         run: |
           cd app2
           npm install
           npm test
 
   # ============================================================
-  # JOB 2 — Build e push (apenas na main)
+  # JOB 2 — Build e Push (apenas na main)
   # ============================================================
   build:
     name: Build & Push
@@ -65,7 +63,7 @@ jobs:
       - name: Configurar Docker → Artifact Registry
         run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
 
-      - name: Build e push App 1 (Python/FastAPI)
+      - name: Build e push App 1
         env:
           REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}
         run: |
@@ -73,7 +71,7 @@ jobs:
           docker push $REGISTRY/app1:latest
           docker push $REGISTRY/app1:${{ github.sha }}
 
-      - name: Build e push App 2 (Node.js/Express)
+      - name: Build e push App 2
         env:
           REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}
         run: |
@@ -82,7 +80,7 @@ jobs:
           docker push $REGISTRY/app2:${{ github.sha }}
 
   # ============================================================
-  # JOB 3 — Deploy via SSH na VM GCE
+  # JOB 3 — Infra (Terraform) + Deploy via SSH
   # ============================================================
   deploy:
     name: Deploy GCE
@@ -99,7 +97,54 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      - name: Deploy via SSH (gcloud compute ssh)
+      # Terraform gerencia VM + Artifact Registry + Firewall
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform — criar/manter infraestrutura
+        env:
+          PROJECT:            ${{ secrets.GCP_PROJECT_ID }}
+          # Terraform usa GOOGLE_CREDENTIALS para autenticar
+          GOOGLE_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+        run: |
+          cd infra/terraform
+
+          cat > terraform.tfvars <<EOF
+          project_id = "$PROJECT"
+          region     = "${{ env.REGION }}"
+          zone       = "${{ env.ZONE }}"
+          repo_name  = "${{ env.REPO }}"
+          EOF
+
+          # Bucket de estado foi criado pelo setup.sh
+          terraform init \
+            -input=false \
+            -backend-config="bucket=$PROJECT-tfstate" \
+            -backend-config="prefix=devops-challenge"
+
+          terraform apply -auto-approve -input=false
+
+          # Exporta o IP para os próximos steps
+          echo "VM_IP=$(terraform output -raw vm_ip)" >> $GITHUB_ENV
+
+      - name: Aguardar VM estar pronta
+        run: |
+          echo "VM IP: $VM_IP"
+          echo "Aguardando health check..."
+          for i in $(seq 1 40); do
+            STATUS=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 \
+              "http://$VM_IP/health" 2>/dev/null || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "VM pronta!"
+              exit 0
+            fi
+            echo "Tentativa $i/40 (status=$STATUS)..."
+            sleep 15
+          done
+          echo "VM ainda não respondeu — pode ser primeiro boot (startup script ainda rodando)"
+
+      - name: Deploy via SSH
         env:
           REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}
           PROJECT:  ${{ secrets.GCP_PROJECT_ID }}
@@ -120,19 +165,14 @@ jobs:
               docker compose -f docker-compose.prod.yml ps
             "
 
-      - name: Exibir URLs
-        env:
-          PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+      - name: Resumo do deploy
         run: |
-          IP=$(gcloud compute instances describe ${{ env.VM_NAME }} \
-            --zone=${{ env.ZONE }} --project=$PROJECT \
-            --format="get(networkInterfaces[0].accessConfigs[0].natIP)")
           echo "## Deploy concluído!" >> $GITHUB_STEP_SUMMARY
-          echo "| Rota | URL |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
-          echo "| App 1 texto   (cache 10s) | http://$IP/app1/text |" >> $GITHUB_STEP_SUMMARY
-          echo "| App 1 horário (cache 10s) | http://$IP/app1/time |" >> $GITHUB_STEP_SUMMARY
-          echo "| App 2 texto   (cache 60s) | http://$IP/app2/text |" >> $GITHUB_STEP_SUMMARY
-          echo "| App 2 horário (cache 60s) | http://$IP/app2/time |" >> $GITHUB_STEP_SUMMARY
-          echo "| Prometheus | http://$IP:9090 |" >> $GITHUB_STEP_SUMMARY
-          echo "| Grafana    | http://$IP:3000 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Serviço | URL |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| App 1 texto   (cache 10s) | http://$VM_IP/app1/text |" >> $GITHUB_STEP_SUMMARY
+          echo "| App 1 horário (cache 10s) | http://$VM_IP/app1/time |" >> $GITHUB_STEP_SUMMARY
+          echo "| App 2 texto   (cache 60s) | http://$VM_IP/app2/text |" >> $GITHUB_STEP_SUMMARY
+          echo "| App 2 horário (cache 60s) | http://$VM_IP/app2/time |" >> $GITHUB_STEP_SUMMARY
+          echo "| Prometheus | http://$VM_IP:9090 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Grafana (admin/admin) | http://$VM_IP:3000 |" >> $GITHUB_STEP_SUMMARY

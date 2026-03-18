@@ -45,6 +45,7 @@ ok "Ferramentas OK"
 PROJECT_ID=$(grep -o '"project_id": *"[^"]*"' "$CREDS" | grep -o '[^"]*"$' | tr -d '"')
 SA_EMAIL=$(grep -o '"client_email": *"[^"]*"' "$CREDS"  | grep -o '[^"]*"$' | tr -d '"')
 REGISTRY="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO"
+TFSTATE_BUCKET="$PROJECT_ID-tfstate"
 
 echo ""
 echo "  ┌─────────────────────────────────────────────────────┐"
@@ -65,27 +66,62 @@ gcloud auth activate-service-account --key-file="$CREDS" --quiet
 gcloud config set project "$PROJECT_ID" --quiet
 ok "Autenticado como $SA_EMAIL"
 
-# ── 2. Habilita APIs + Terraform ──────────────────────────────
+# ── 2. Habilita APIs ──────────────────────────────────────────
 step "2/4 — Habilitando APIs e provisionando infraestrutura..."
 gcloud services enable \
   cloudresourcemanager.googleapis.com \
   compute.googleapis.com \
   artifactregistry.googleapis.com \
   cloudbuild.googleapis.com \
+  storage.googleapis.com \
   --project="$PROJECT_ID" --quiet
 ok "APIs habilitadas"
 
+# Cria o bucket de estado do Terraform (idempotente)
+echo "  Criando bucket de estado: gs://$TFSTATE_BUCKET"
+gsutil mb -p "$PROJECT_ID" -l "$REGION" "gs://$TFSTATE_BUCKET" 2>/dev/null \
+  || true  # já existe? ok
+gsutil versioning set on "gs://$TFSTATE_BUCKET" 2>/dev/null || true
+
+# Terraform: init + apply
 cd infra/terraform
-cat > terraform.tfvars << EOF
+cat > terraform.tfvars <<EOF
 project_id   = "$PROJECT_ID"
 region       = "$REGION"
 zone         = "$ZONE"
 repo_name    = "$REPO"
 EOF
 
-terraform init -upgrade -input=false -no-color 2>&1 | grep -E "Initialized|provider|Terraform"
-terraform apply -auto-approve -input=false -no-color 2>&1 | \
-  grep -E "Apply complete|created|vm_ip|error|Error" || true
+# Remove estado local stale (VM foi deletada, migra para GCS)
+rm -rf .terraform terraform.tfstate terraform.tfstate.backup 2>/dev/null || true
+
+echo "  Inicializando Terraform (backend GCS)..."
+terraform init \
+  -input=false \
+  -migrate-state \
+  -backend-config="bucket=$TFSTATE_BUCKET" \
+  -backend-config="prefix=devops-challenge"
+
+# Importa recursos que já existem na GCP (idempotente — falha silenciosa se não existir)
+echo "  Importando recursos existentes..."
+terraform import -input=false \
+  google_artifact_registry_repository.docker_repo \
+  "projects/$PROJECT_ID/locations/$REGION/repositories/$REPO" 2>/dev/null || true
+terraform import -input=false \
+  google_compute_firewall.allow_app \
+  "projects/$PROJECT_ID/global/firewalls/devops-challenge-allow" 2>/dev/null || true
+terraform import -input=false \
+  "google_project_service.apis[\"compute.googleapis.com\"]" \
+  "projects/$PROJECT_ID/compute.googleapis.com" 2>/dev/null || true
+terraform import -input=false \
+  "google_project_service.apis[\"artifactregistry.googleapis.com\"]" \
+  "projects/$PROJECT_ID/artifactregistry.googleapis.com" 2>/dev/null || true
+terraform import -input=false \
+  "google_project_service.apis[\"cloudbuild.googleapis.com\"]" \
+  "projects/$PROJECT_ID/cloudbuild.googleapis.com" 2>/dev/null || true
+
+echo "  Aplicando infraestrutura..."
+terraform apply -auto-approve -input=false
 cd ../..
 
 VM_IP=$(cd infra/terraform && terraform output -raw vm_ip 2>/dev/null || echo "")
@@ -119,7 +155,7 @@ for i in $(seq 1 40); do
   if [[ $i -eq 40 ]]; then
     echo ""
     warn "Timeout esperando a VM. A stack pode ainda estar iniciando."
-    warn "Verifique o log da VM com: gcloud compute ssh $VM_NAME --zone=$ZONE --command='sudo journalctl -u google-startup-scripts -f'"
+    warn "Verifique: gcloud compute ssh $VM_NAME --zone=$ZONE --command='sudo journalctl -u google-startup-scripts -f'"
   fi
 done
 

@@ -6,6 +6,9 @@ terraform {
       version = "~> 5.0"
     }
   }
+  # Estado remoto no GCS — compartilhado entre setup.sh e CI/CD
+  # bucket e prefix são passados via -backend-config (não hardcoded)
+  backend "gcs" {}
 }
 
 provider "google" {
