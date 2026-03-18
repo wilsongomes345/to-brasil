@@ -105,29 +105,31 @@ ok "app2 enviada"
 
 # ── 4. Aguarda VM e faz primeiro deploy ───────────────────────
 step "4/5 — Aguardando VM inicializar e fazendo deploy..."
+
+# Configura SSH nativo (evita plink no Windows)
+gcloud compute config-ssh --project="$PROJECT_ID" --quiet 2>/dev/null
+SSH_HOST="$VM_NAME.$ZONE.$PROJECT_ID"
+
 echo -n "  Aguardando Docker estar pronto na VM"
 for i in {1..20}; do
-  READY=$(gcloud compute ssh "$VM_NAME" --zone="$ZONE" --project="$PROJECT_ID" \
-    --quiet --ssh-flag="-o StrictHostKeyChecking=no" \
-    --command="docker info &>/dev/null && echo yes || echo no" 2>/dev/null || echo "no")
+  READY=$(ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10 \
+    "$SSH_HOST" "sudo docker info &>/dev/null && echo yes || echo no" 2>/dev/null || echo "no")
   [[ "$READY" == "yes" ]] && echo " OK!" && break
   printf "."
   sleep 15
-  [[ $i -eq 20 ]] && echo "" && die "VM não ficou pronta. Verifique: gcloud compute ssh $VM_NAME --zone=$ZONE"
+  [[ $i -eq 20 ]] && echo "" && die "VM não ficou pronta. Verifique: ssh $SSH_HOST"
 done
 
-gcloud compute ssh "$VM_NAME" --zone="$ZONE" --project="$PROJECT_ID" \
-  --quiet --ssh-flag="-o StrictHostKeyChecking=no" \
-  --command="
-    set -e
-    cd /opt/app
-    git pull origin main
-    echo 'REGISTRY=$REGISTRY' > .env
-    gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
-    docker compose -f docker-compose.prod.yml pull
-    docker compose -f docker-compose.prod.yml up -d --remove-orphans
-    docker compose -f docker-compose.prod.yml ps
-  "
+ssh -o StrictHostKeyChecking=no "$SSH_HOST" "sudo bash -s" << DEPLOY
+  set -e
+  cd /opt/app
+  git pull origin main
+  echo 'REGISTRY=$REGISTRY' > .env
+  gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
+  docker compose -f docker-compose.prod.yml pull
+  docker compose -f docker-compose.prod.yml up -d --remove-orphans
+  docker compose -f docker-compose.prod.yml ps
+DEPLOY
 ok "Aplicação rodando na VM"
 
 # ── 5. GitHub Secrets (CI/CD automático) ─────────────────────
