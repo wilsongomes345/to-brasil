@@ -34,7 +34,7 @@ jobs:
         run: |
           cd app1
           pip install -r requirements.txt
-          pip install httpx pytest
+          pip install "httpx<0.28" pytest
 
       - name: Testar App 1 (pytest)
         run: |
