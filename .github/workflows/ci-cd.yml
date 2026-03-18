@@ -90,12 +90,23 @@ jobs:
           docker push $REGISTRY/app2:latest
           docker push $REGISTRY/app2:${{ github.sha }}
 
-      - name: Scan de vulnerabilidades — App 1 (Trivy)
+      - name: Instalar Trivy
+        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Scan de vulnerabilidades — App 1 (Trivy → SARIF)
         env:
           REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}
         run: |
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
           TOKEN=$(gcloud auth print-access-token)
+          trivy image \
+            --username oauth2accesstoken \
+            --password "$TOKEN" \
+            --severity CRITICAL,HIGH \
+            --exit-code 0 \
+            --format sarif \
+            --output trivy-app1.sarif \
+            "$REGISTRY/app1:latest"
+          # Também exibe no log como tabela
           trivy image \
             --username oauth2accesstoken \
             --password "$TOKEN" \
@@ -104,7 +115,7 @@ jobs:
             --format table \
             "$REGISTRY/app1:latest"
 
-      - name: Scan de vulnerabilidades — App 2 (Trivy)
+      - name: Scan de vulnerabilidades — App 2 (Trivy → SARIF)
         env:
           REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}
         run: |
@@ -114,8 +125,23 @@ jobs:
             --password "$TOKEN" \
             --severity CRITICAL,HIGH \
             --exit-code 0 \
+            --format sarif \
+            --output trivy-app2.sarif \
+            "$REGISTRY/app2:latest"
+          trivy image \
+            --username oauth2accesstoken \
+            --password "$TOKEN" \
+            --severity CRITICAL,HIGH \
+            --exit-code 0 \
             --format table \
             "$REGISTRY/app2:latest"
+
+      - name: Publicar resultados no GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: .
+          category: trivy-docker
 
   # ============================================================
   # JOB 3 — Infra (Terraform) + Deploy via SSH
