@@ -156,6 +156,7 @@ jobs:
             --ssh-flag="-o StrictHostKeyChecking=no" \
             --command="
               set -e
+              git config --global --add safe.directory /opt/app
               cd /opt/app
               git pull origin main
               echo 'REGISTRY=$REGISTRY' > .env
