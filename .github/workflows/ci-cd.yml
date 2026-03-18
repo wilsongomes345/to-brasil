@@ -50,7 +50,7 @@ jobs:
       - name: Instalar dependências App 2
         run: |
           cd app2
-          npm ci
+          npm install
 
       - name: Testar App 2 (Node test runner)
         run: |
