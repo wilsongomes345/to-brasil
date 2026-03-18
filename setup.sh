@@ -5,6 +5,14 @@
 # =============================================================
 set -euo pipefail
 
+# ── PATH: adiciona ferramentas instaladas via winget/Google SDK ─
+# gcloud precisa do Python bundled (resolve conflito com Windows Store)
+export CLOUDSDK_PYTHON="/c/Program Files (x86)/Google/Cloud SDK/google-cloud-sdk/platform/bundledpython/python.exe"
+GCLOUD_BIN="/c/Program Files (x86)/Google/Cloud SDK/google-cloud-sdk/bin"
+WINGET_BIN="/c/Users/Wilson/AppData/Local/Microsoft/WinGet/Links"
+DOCKER_BIN="/c/Program Files/Docker/Docker/resources/bin"
+export PATH="$PATH:$GCLOUD_BIN:$WINGET_BIN:$DOCKER_BIN"
+
 # ── Configurações ─────────────────────────────────────────────
 CREDS="credentials.json"
 REGION="us-central1"
@@ -33,8 +41,7 @@ step "Verificando pré-requisitos..."
 command -v gcloud    &>/dev/null || die "gcloud não instalado"
 command -v terraform &>/dev/null || die "terraform não instalado"
 command -v kubectl   &>/dev/null || die "kubectl não instalado"
-command -v docker    &>/dev/null || die "docker não instalado"
-docker info &>/dev/null          || die "Docker não está rodando — abra o Docker Desktop"
+command -v gcloud &>/dev/null || die "gcloud não encontrado no PATH"
 ok "Todas as ferramentas disponíveis"
 
 # ── Extrai dados do credentials.json ──────────────────────────
@@ -60,8 +67,20 @@ gcloud config set project "$PROJECT_ID" --quiet
 gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
 ok "Autenticado como $SA_EMAIL"
 
-# ── 2. Terraform — GKE + Artifact Registry ────────────────────
-step "2/6 — Provisionando infraestrutura (GKE Autopilot + Artifact Registry)..."
+# ── 2a. Habilita APIs necessárias via gcloud ──────────────────
+step "2/6 — Habilitando APIs do GCP (necessário para o Terraform)..."
+gcloud services enable \
+  cloudresourcemanager.googleapis.com \
+  iam.googleapis.com \
+  container.googleapis.com \
+  artifactregistry.googleapis.com \
+  cloudbuild.googleapis.com \
+  compute.googleapis.com \
+  --project="$PROJECT_ID" --quiet
+ok "APIs habilitadas"
+
+# ── 2b. Terraform — GKE + Artifact Registry ───────────────────
+step "  Provisionando infraestrutura (GKE Autopilot + Artifact Registry)..."
 cd infra/terraform
 
 cat > terraform.tfvars << EOF
@@ -82,17 +101,22 @@ gcloud container clusters get-credentials "$CLUSTER" \
   --region "$REGION" --project "$PROJECT_ID"
 ok "kubectl apontando para $CLUSTER"
 
-# ── 4. Build e push das imagens ───────────────────────────────
-step "4/6 — Build e push das imagens para o Artifact Registry..."
+# ── 4. Build e push via Cloud Build (sem Docker local) ────────
+step "4/6 — Build e push das imagens via Google Cloud Build..."
+# Cloud Build roda na GCP — não precisa de Docker instalado localmente
 
-echo "  → Building App 1 (Python/FastAPI)..."
-docker build -t "$REGISTRY/app1:latest" ./app1 -q
-docker push  "$REGISTRY/app1:latest" -q
+echo "  → Cloud Build: App 1 (Python/FastAPI)..."
+gcloud builds submit ./app1 \
+  --tag "$REGISTRY/app1:latest" \
+  --project "$PROJECT_ID" \
+  --quiet
 ok "app1 enviada para $REGISTRY/app1:latest"
 
-echo "  → Building App 2 (Node.js/Express)..."
-docker build -t "$REGISTRY/app2:latest" ./app2 -q
-docker push  "$REGISTRY/app2:latest" -q
+echo "  → Cloud Build: App 2 (Node.js/Express)..."
+gcloud builds submit ./app2 \
+  --tag "$REGISTRY/app2:latest" \
+  --project "$PROJECT_ID" \
+  --quiet
 ok "app2 enviada para $REGISTRY/app2:latest"
 
 # ── 5. Deploy no GKE ─────────────────────────────────────────

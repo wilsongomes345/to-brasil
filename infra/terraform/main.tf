@@ -21,6 +21,7 @@ resource "google_project_service" "apis" {
     "container.googleapis.com",          # GKE
     "artifactregistry.googleapis.com",   # Artifact Registry
     "compute.googleapis.com",            # Necessário pelo GKE
+    "cloudbuild.googleapis.com",         # Cloud Build (build de imagens sem Docker local)
   ])
   service            = each.key
   disable_on_destroy = false
