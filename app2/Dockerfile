@@ -7,7 +7,6 @@ RUN npm install --omit=dev
 
 COPY index.js .
 
-# Ajuste de permissões para usuário e grupo node
 RUN chown -R node:node /app
 
 USER node

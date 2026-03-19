@@ -5,6 +5,7 @@ services:
   # --------------------------------------------------------
   app1:
     build: ./app1
+    image: ${REGISTRY:-local}/app1:latest
     container_name: app1
     restart: unless-stopped
     networks:
@@ -22,6 +23,7 @@ services:
   # --------------------------------------------------------
   app2:
     build: ./app2
+    image: ${REGISTRY:-local}/app2:latest
     container_name: app2
     restart: unless-stopped
     networks:

@@ -5,3 +5,7 @@ __pycache__/
 .env
 .DS_Store
 credentials.json
+*.tfvars
+infra/terraform/.terraform/
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.backup
