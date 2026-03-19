@@ -8,7 +8,7 @@
     "test": "node --test app2.test.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
+    "express": "^5.2.1",
     "prom-client": "^15.1.0"
   }
 }
