@@ -6,11 +6,7 @@ terraform {
       version = "~> 5.0"
     }
   }
-  backend "gcs" {
-    # Configurado via -backend-config no CI/CD:
-    # bucket = "<project-id>-tfstate"
-    # prefix = "devops-challenge"
-  }
+  backend "gcs" {}
 }
 
 provider "google" {

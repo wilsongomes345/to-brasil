@@ -4,7 +4,6 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 app = FastAPI(title="App 1 - Python FastAPI")
 
-# Expõe /metrics automaticamente com métricas de request rate, latência, etc.
 Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 

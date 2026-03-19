@@ -6,7 +6,6 @@ const client = require('prom-client');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// ── Prometheus metrics ────────────────────────────────────────
 const register = new client.Registry();
 client.collectDefaultMetrics({ register });
 
@@ -25,7 +24,6 @@ const httpRequestDuration = new client.Histogram({
   registers: [register],
 });
 
-// Middleware: instrumenta todas as rotas
 app.use((req, res, next) => {
   const end = httpRequestDuration.startTimer();
   res.on('finish', () => {
@@ -37,7 +35,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// ── Rotas ─────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', app: 'app2' });
 });
