@@ -7,17 +7,17 @@ on:
     branches: [main]
 
 env:
-  REGION:   us-central1
-  ZONE:     us-central1-a
-  REPO:     devops-challenge
-  VM_NAME:  devops-challenge-vm
+  REGION:  us-central1
+  ZONE:    us-central1-a
+  REPO:    devops-challenge
+  VM_NAME: devops-challenge-vm
 
 jobs:
   # ============================================================
-  # JOB 1 — Testes
+  # JOB 1 — Testes + verificação de vulnerabilidades
   # ============================================================
   test:
-    name: Testes
+    name: Testes & Security
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,6 +32,11 @@ jobs:
           pip install -r requirements.txt "httpx<0.28" pytest -q
           pytest test_main.py -v
 
+      - name: Vulnerabilidades Python (pip-audit)
+        run: |
+          pip install pip-audit
+          pip-audit -r app1/requirements.txt --desc on || true
+
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -42,14 +47,22 @@ jobs:
           npm install
           npm test
 
+      - name: Vulnerabilidades Node.js (npm audit)
+        run: |
+          cd app2
+          npm audit --audit-level=critical || true
+
   # ============================================================
-  # JOB 2 — Build e push das imagens
+  # JOB 2 — Build, push e scan de segurança das imagens
   # ============================================================
   build:
-    name: Build & Push
+    name: Build, Push & Trivy
     runs-on: ubuntu-latest
     needs: test
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      security-events: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -78,8 +91,53 @@ jobs:
           docker push $REGISTRY/app2:latest
           docker push $REGISTRY/app2:${{ github.sha }}
 
+      - name: Instalar Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin
+
+      - name: Trivy — scan App 1
+        env:
+          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}
+        run: |
+          trivy image \
+            --username oauth2accesstoken \
+            --password "$(gcloud auth print-access-token)" \
+            --severity CRITICAL,HIGH \
+            --exit-code 0 \
+            --format sarif \
+            --output trivy-app1.sarif \
+            $REGISTRY/app1:latest
+
+      - name: Trivy — scan App 2
+        env:
+          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}
+        run: |
+          trivy image \
+            --username oauth2accesstoken \
+            --password "$(gcloud auth print-access-token)" \
+            --severity CRITICAL,HIGH \
+            --exit-code 0 \
+            --format sarif \
+            --output trivy-app2.sarif \
+            $REGISTRY/app2:latest
+
+      - name: Publicar App 1 → GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-app1.sarif
+          category: trivy-app1
+
+      - name: Publicar App 2 → GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-app2.sarif
+          category: trivy-app2
+
   # ============================================================
-  # JOB 3 — Terraform + Deploy
+  # JOB 3 — Terraform + Deploy via SSH
   # ============================================================
   deploy:
     name: Deploy (Terraform + SSH)
@@ -99,22 +157,19 @@ jobs:
         with:
           terraform_wrapper: false
 
-      - name: Habilitar APIs e criar bucket de estado
+      - name: Criar bucket de estado Terraform
         env:
           PROJECT: ${{ secrets.GCP_PROJECT_ID }}
         run: |
-          gcloud services enable \
-            compute.googleapis.com \
-            artifactregistry.googleapis.com \
+          gcloud services enable compute.googleapis.com artifactregistry.googleapis.com \
             --project=$PROJECT --quiet
 
           BUCKET="${PROJECT}-tfstate"
           gcloud storage buckets create "gs://$BUCKET" \
-            --project=$PROJECT --location=$REGION 2>/dev/null \
-            || echo "Bucket já existe"
+            --project=$PROJECT --location=$REGION 2>/dev/null || echo "Bucket já existe"
           gcloud storage buckets update "gs://$BUCKET" --versioning 2>/dev/null || true
 
-      - name: Terraform Init
+      - name: Terraform Init & Apply
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
           PROJECT: ${{ secrets.GCP_PROJECT_ID }}
@@ -127,33 +182,28 @@ jobs:
           repo_name  = "devops-challenge"
           repo_url   = "https://github.com/wilsongomes345/to-brasil.git"
           EOF
+
           terraform init \
             -input=false \
             -backend-config="bucket=${PROJECT}-tfstate" \
             -backend-config="prefix=devops-challenge"
 
-      - name: Terraform Apply
-        env:
-          GOOGLE_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
-          PROJECT: ${{ secrets.GCP_PROJECT_ID }}
-        run: |
-          cd infra/terraform
           terraform apply -auto-approve -input=false
+
           echo "VM_IP=$(terraform output -raw vm_ip)" >> $GITHUB_ENV
           echo "REGISTRY=$(terraform output -raw registry_url)" >> $GITHUB_ENV
 
-      - name: Aguardar Docker na VM
+      - name: Aguardar stack inicializar (health check HTTP)
         run: |
-          echo "Aguardando VM inicializar..."
+          echo "Aguardando a stack ficar pronta em http://$VM_IP/health ..."
           for i in $(seq 1 40); do
-            if gcloud compute ssh $VM_NAME \
-              --zone=$ZONE --project=${{ secrets.GCP_PROJECT_ID }} \
-              --quiet --ssh-flag="-o StrictHostKeyChecking=no" \
-              --command="docker info" &>/dev/null; then
-              echo "VM pronta!"
+            STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
+              --max-time 5 "http://$VM_IP/health" 2>/dev/null || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "Stack pronta!"
               break
             fi
-            echo "Tentativa $i/40..."
+            echo "Tentativa $i/40 (status=$STATUS)..."
             sleep 15
           done
 
@@ -176,7 +226,7 @@ jobs:
               sudo docker compose ps
             "
 
-      - name: Resumo
+      - name: Resumo do deploy
         run: |
           echo "## ✅ Deploy concluído!" >> $GITHUB_STEP_SUMMARY
           echo "| Serviço | URL |" >> $GITHUB_STEP_SUMMARY
