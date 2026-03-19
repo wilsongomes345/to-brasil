@@ -177,4 +177,3 @@ flowchart LR
 | 7 | Loki + Grafana | Centralizar logs junto às métricas |
 | 8 | OpenTelemetry | Distributed tracing entre Nginx e apps |
 | 9 | Managed Instance Group | Auto-healing e escala horizontal automática da VM |
-| 10 | Static IP | IP fixo para evitar mudança de endereço ao reiniciar a VM |
