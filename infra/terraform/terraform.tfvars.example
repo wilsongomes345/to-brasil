@@ -1,8 +1,0 @@
-# Copie para terraform.tfvars e preencha
-# cp terraform.tfvars.example terraform.tfvars
-
-project_id   = "SEU_PROJECT_ID"
-region       = "us-central1"
-zone         = "us-central1-a"
-machine_type = "e2-medium"
-repo_name    = "devops-challenge"

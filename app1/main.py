@@ -16,7 +16,7 @@ def health():
 @app.get("/text")
 def get_text():
     return {
-        "message": "Hello from App 1!",
+        "message": "Desafio devops!",
         "app": "app1",
         "language": "Python",
         "framework": "FastAPI",

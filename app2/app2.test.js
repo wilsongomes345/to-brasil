@@ -1,5 +1,4 @@
 // Testes da App 2 - Node.js Express
-// Usa o test runner nativo do Node.js (>=18) — sem dependências extras
 'use strict';
 
 const { test, after } = require('node:test');
@@ -8,11 +7,9 @@ const http = require('node:http');
 
 const app = require('./index');
 
-// Inicia servidor em porta aleatória para os testes
 let server;
 let baseUrl;
 
-// Setup: inicia servidor antes dos testes
 const serverReady = new Promise((resolve) => {
   server = app.listen(0, () => {
     const { port } = server.address();
@@ -21,7 +18,6 @@ const serverReady = new Promise((resolve) => {
   });
 });
 
-// Helper para fazer requisições HTTP
 function get(path) {
   return new Promise((resolve, reject) => {
     http.get(`${baseUrl}${path}`, (res) => {
@@ -65,10 +61,9 @@ test('GET /time retorna horário ISO 8601 válido', async () => {
   assert.ok(!isNaN(parsed.getTime()), 'time deve ser uma data válida');
 });
 
-// Teardown: fecha servidor e todas as conexões (libera o processo)
 after(() => {
   if (server) {
-    server.closeAllConnections?.(); // Node 18.2+ — fecha keep-alive connections
+    server.closeAllConnections?.();
     server.close();
   }
 });

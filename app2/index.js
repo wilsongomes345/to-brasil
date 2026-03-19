@@ -44,7 +44,7 @@ app.get('/health', (_req, res) => {
 
 app.get('/text', (_req, res) => {
   res.json({
-    message: 'Hello from App 2!',
+    message: 'Desafio devops',
     app: 'app2',
     language: 'Node.js',
     framework: 'Express',
@@ -63,7 +63,6 @@ app.get('/metrics', async (_req, res) => {
   res.end(await register.metrics());
 });
 
-// Só inicia o servidor se executado diretamente (não em testes)
 if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`App 2 listening on port ${PORT}`);

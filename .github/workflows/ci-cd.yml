@@ -1,4 +1,4 @@
-name: CI/CD Pipeline
+name: CI
 
 on:
   push:
@@ -6,22 +6,18 @@ on:
   pull_request:
     branches: [main]
 
-env:
-  REGION:  us-central1
-  ZONE:    us-central1-a
-  REPO:    devops-challenge
-  VM_NAME: devops-challenge-vm
-
 jobs:
   # ============================================================
-  # JOB 1 — Testes + Dependency Security Check
+  # Testes + verificação de vulnerabilidades nas dependências
   # ============================================================
   test:
     name: Testes & Security
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
+      # ── App 1 — Python / FastAPI ──────────────────────────────
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -32,12 +28,12 @@ jobs:
           pip install -r requirements.txt "httpx<0.28" pytest
           pytest test_main.py -v
 
-      - name: Verificar vulnerabilidades Python (pip-audit)
+      - name: Vulnerabilidades Python (pip-audit)
         run: |
           pip install pip-audit
-          cd app1
-          pip-audit -r requirements.txt --desc on || true
+          pip-audit -r app1/requirements.txt --desc on || true
 
+      # ── App 2 — Node.js / Express ─────────────────────────────
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -48,292 +44,24 @@ jobs:
           npm install
           npm test
 
-      - name: Verificar vulnerabilidades Node.js (npm audit)
+      - name: Vulnerabilidades Node.js (npm audit)
         run: |
           cd app2
           npm audit --audit-level=critical || true
 
   # ============================================================
-  # JOB 2 — Build, Push e Scan de Segurança de Imagens
+  # Verifica que as imagens Docker constroem sem erros
   # ============================================================
   build:
-    name: Build, Push & Trivy Scan
+    name: Build Docker Images
     runs-on: ubuntu-latest
     needs: test
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    permissions:
-      security-events: write
-      contents: read
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+      - name: Build App 1
+        run: docker build -t app1:test ./app1
 
-      - uses: google-github-actions/setup-gcloud@v2
-
-      - name: Configurar Docker → Artifact Registry
-        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
-
-      - name: Build e push App 1
-        env:
-          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}
-        run: |
-          docker build -t $REGISTRY/app1:latest -t $REGISTRY/app1:${{ github.sha }} ./app1
-          docker push $REGISTRY/app1:latest
-          docker push $REGISTRY/app1:${{ github.sha }}
-
-      - name: Build e push App 2
-        env:
-          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}
-        run: |
-          docker build -t $REGISTRY/app2:latest -t $REGISTRY/app2:${{ github.sha }} ./app2
-          docker push $REGISTRY/app2:latest
-          docker push $REGISTRY/app2:${{ github.sha }}
-
-      - name: Instalar Trivy
-        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
-
-      - name: Scan de vulnerabilidades — App 1 (Trivy → SARIF)
-        env:
-          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}
-        run: |
-          TOKEN=$(gcloud auth print-access-token)
-          trivy image \
-            --username oauth2accesstoken \
-            --password "$TOKEN" \
-            --severity CRITICAL,HIGH \
-            --exit-code 0 \
-            --format sarif \
-            --output trivy-app1.sarif \
-            "$REGISTRY/app1:latest"
-          # Também exibe no log como tabela
-          trivy image \
-            --username oauth2accesstoken \
-            --password "$TOKEN" \
-            --severity CRITICAL,HIGH \
-            --exit-code 0 \
-            --format table \
-            "$REGISTRY/app1:latest"
-
-      - name: Scan de vulnerabilidades — App 2 (Trivy → SARIF)
-        env:
-          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}
-        run: |
-          TOKEN=$(gcloud auth print-access-token)
-          trivy image \
-            --username oauth2accesstoken \
-            --password "$TOKEN" \
-            --severity CRITICAL,HIGH \
-            --exit-code 0 \
-            --format sarif \
-            --output trivy-app2.sarif \
-            "$REGISTRY/app2:latest"
-          trivy image \
-            --username oauth2accesstoken \
-            --password "$TOKEN" \
-            --severity CRITICAL,HIGH \
-            --exit-code 0 \
-            --format table \
-            "$REGISTRY/app2:latest"
-
-      - name: Publicar App 1 no GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: trivy-app1.sarif
-          category: trivy-app1
-
-      - name: Publicar App 2 no GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: trivy-app2.sarif
-          category: trivy-app2
-
-  # ============================================================
-  # JOB 3 — Infra (Terraform) + Deploy via SSH
-  # ============================================================
-  deploy:
-    name: Deploy GCE
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
-
-      - uses: google-github-actions/setup-gcloud@v2
-
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_wrapper: false
-
-      - name: Terraform — criar/manter infraestrutura
-        env:
-          PROJECT:            ${{ secrets.GCP_PROJECT_ID }}
-          GOOGLE_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
-        run: |
-          cd infra/terraform
-          cat > terraform.tfvars <<EOF
-          project_id = "$PROJECT"
-          region     = "${{ env.REGION }}"
-          zone       = "${{ env.ZONE }}"
-          repo_name  = "${{ env.REPO }}"
-          EOF
-
-          terraform init \
-            -input=false \
-            -backend-config="bucket=$PROJECT-tfstate" \
-            -backend-config="prefix=devops-challenge"
-
-          terraform apply -auto-approve -input=false
-          echo "VM_IP=$(terraform output -raw vm_ip)" >> $GITHUB_ENV
-
-      - name: Aguardar VM estar pronta
-        run: |
-          echo "VM IP: $VM_IP"
-          for i in $(seq 1 40); do
-            STATUS=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 \
-              "http://$VM_IP/health" 2>/dev/null || echo "000")
-            if [ "$STATUS" = "200" ]; then
-              echo "VM pronta!"
-              exit 0
-            fi
-            echo "Tentativa $i/40 (status=$STATUS)..."
-            sleep 15
-          done
-          echo "VM ainda não respondeu — startup script pode ainda estar rodando"
-
-      - name: Deploy via SSH
-        env:
-          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}
-          PROJECT:  ${{ secrets.GCP_PROJECT_ID }}
-        run: |
-          gcloud compute ssh ${{ env.VM_NAME }} \
-            --zone=${{ env.ZONE }} \
-            --project=$PROJECT \
-            --quiet \
-            --ssh-flag="-o StrictHostKeyChecking=no" \
-            --command="
-              set -e
-              sudo git config --global --add safe.directory /opt/app
-              cd /opt/app
-              sudo git pull origin main
-              echo 'REGISTRY=$REGISTRY' | sudo tee .env
-              sudo gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
-              sudo docker compose -f docker-compose.prod.yml pull
-              sudo docker compose -f docker-compose.prod.yml up -d --remove-orphans
-              sudo docker compose -f docker-compose.prod.yml ps
-            "
-
-  # ============================================================
-  # JOB 4 — Smoke Test (valida cache + endpoints após deploy)
-  # ============================================================
-  smoke-test:
-    name: Smoke Test
-    runs-on: ubuntu-latest
-    needs: deploy
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
-
-      - uses: google-github-actions/setup-gcloud@v2
-
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_wrapper: false
-
-      - name: Obter IP da VM
-        env:
-          PROJECT:            ${{ secrets.GCP_PROJECT_ID }}
-          GOOGLE_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
-        run: |
-          cd infra/terraform
-          cat > terraform.tfvars <<EOF
-          project_id = "$PROJECT"
-          region     = "${{ env.REGION }}"
-          zone       = "${{ env.ZONE }}"
-          repo_name  = "${{ env.REPO }}"
-          EOF
-          terraform init -input=false \
-            -backend-config="bucket=$PROJECT-tfstate" \
-            -backend-config="prefix=devops-challenge"
-          echo "VM_IP=$(terraform output -raw vm_ip)" >> $GITHUB_ENV
-
-      - name: Smoke Test — endpoints e cache
-        run: |
-          BASE="http://$VM_IP"
-          FAIL=0
-
-          check() {
-            local url=$1
-            local expected=$2
-            local status
-            status=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "$url" 2>/dev/null || echo "000")
-            if [ "$status" = "$expected" ]; then
-              echo "  ✔ $url → $status"
-            else
-              echo "  ✘ $url → $status (esperado $expected)"
-              FAIL=1
-            fi
-          }
-
-          echo "=== Verificando endpoints ==="
-          check "$BASE/health"      "200"
-          check "$BASE/app1/text"   "200"
-          check "$BASE/app1/time"   "200"
-          check "$BASE/app2/text"   "200"
-          check "$BASE/app2/time"   "200"
-          check "$BASE/app1/metrics" "200"
-          check "$BASE/app2/metrics" "200"
-
-          echo ""
-          echo "=== Verificando cache MISS → HIT (App 1, TTL 10s) ==="
-          CACHE1=$(curl -sf -I --max-time 10 "$BASE/app1/time" 2>/dev/null | grep -i x-cache-status | tr -d '\r')
-          sleep 1
-          CACHE2=$(curl -sf -I --max-time 10 "$BASE/app1/time" 2>/dev/null | grep -i x-cache-status | tr -d '\r')
-          echo "  1ª req: $CACHE1"
-          echo "  2ª req: $CACHE2"
-          echo "$CACHE2" | grep -qi "HIT" && echo "  ✔ Cache HIT confirmado!" || { echo "  ✘ Cache HIT não detectado"; FAIL=1; }
-
-          echo ""
-          echo "=== Verificando cache MISS → HIT (App 2, TTL 60s) ==="
-          CACHE3=$(curl -sf -I --max-time 10 "$BASE/app2/time" 2>/dev/null | grep -i x-cache-status | tr -d '\r')
-          sleep 1
-          CACHE4=$(curl -sf -I --max-time 10 "$BASE/app2/time" 2>/dev/null | grep -i x-cache-status | tr -d '\r')
-          echo "  1ª req: $CACHE3"
-          echo "  2ª req: $CACHE4"
-          echo "$CACHE4" | grep -qi "HIT" && echo "  ✔ Cache HIT confirmado!" || { echo "  ✘ Cache HIT não detectado"; FAIL=1; }
-
-          echo ""
-          echo "=== Verificando rate limiting (429 no excesso) ==="
-          for i in $(seq 1 25); do curl -sf -o /dev/null "$BASE/app1/text" 2>/dev/null || true; done
-          RL=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "$BASE/app1/text" 2>/dev/null || echo "000")
-          echo "  Resposta após burst: $RL"
-
-          [ $FAIL -eq 0 ] && echo "" && echo "✅ Todos os smoke tests passaram!" || { echo ""; echo "❌ Smoke tests falharam!"; exit 1; }
-
-      - name: Resumo do deploy
-        run: |
-          echo "## ✅ Deploy concluído com sucesso!" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Serviço | URL |" >> $GITHUB_STEP_SUMMARY
-          echo "|---------|-----|" >> $GITHUB_STEP_SUMMARY
-          echo "| App 1 texto   (cache 10s)  | http://$VM_IP/app1/text |" >> $GITHUB_STEP_SUMMARY
-          echo "| App 1 horário (cache 10s)  | http://$VM_IP/app1/time |" >> $GITHUB_STEP_SUMMARY
-          echo "| App 2 texto   (cache 60s)  | http://$VM_IP/app2/text |" >> $GITHUB_STEP_SUMMARY
-          echo "| App 2 horário (cache 60s)  | http://$VM_IP/app2/time |" >> $GITHUB_STEP_SUMMARY
-          echo "| Prometheus                  | http://$VM_IP:9090 |" >> $GITHUB_STEP_SUMMARY
-          echo "| Grafana (admin/admin)       | http://$VM_IP:3000 |" >> $GITHUB_STEP_SUMMARY
+      - name: Build App 2
+        run: docker build -t app2:test ./app2
