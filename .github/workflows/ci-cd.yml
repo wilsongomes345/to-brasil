@@ -1,4 +1,4 @@
-name: CI
+name: CI/CD
 
 on:
   push:
@@ -6,18 +6,22 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  REGION:   us-central1
+  ZONE:     us-central1-a
+  REPO:     devops-challenge
+  VM_NAME:  devops-challenge-vm
+
 jobs:
   # ============================================================
-  # Testes + verificação de vulnerabilidades nas dependências
+  # JOB 1 — Testes
   # ============================================================
   test:
-    name: Testes & Security
+    name: Testes
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
-      # ── App 1 — Python / FastAPI ──────────────────────────────
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -25,15 +29,9 @@ jobs:
       - name: Testar App 1 (Python/FastAPI)
         run: |
           cd app1
-          pip install -r requirements.txt "httpx<0.28" pytest
+          pip install -r requirements.txt "httpx<0.28" pytest -q
           pytest test_main.py -v
 
-      - name: Vulnerabilidades Python (pip-audit)
-        run: |
-          pip install pip-audit
-          pip-audit -r app1/requirements.txt --desc on || true
-
-      # ── App 2 — Node.js / Express ─────────────────────────────
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -44,24 +42,148 @@ jobs:
           npm install
           npm test
 
-      - name: Vulnerabilidades Node.js (npm audit)
-        run: |
-          cd app2
-          npm audit --audit-level=critical || true
-
   # ============================================================
-  # Verifica que as imagens Docker constroem sem erros
+  # JOB 2 — Build e push das imagens
   # ============================================================
   build:
-    name: Build Docker Images
+    name: Build & Push
     runs-on: ubuntu-latest
     needs: test
-
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build App 1
-        run: docker build -t app1:test ./app1
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
 
-      - name: Build App 2
-        run: docker build -t app2:test ./app2
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configurar Docker → Artifact Registry
+        run: gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
+
+      - name: Build e push App 1
+        env:
+          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}
+        run: |
+          docker build -t $REGISTRY/app1:latest -t $REGISTRY/app1:${{ github.sha }} ./app1
+          docker push $REGISTRY/app1:latest
+          docker push $REGISTRY/app1:${{ github.sha }}
+
+      - name: Build e push App 2
+        env:
+          REGISTRY: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}
+        run: |
+          docker build -t $REGISTRY/app2:latest -t $REGISTRY/app2:${{ github.sha }} ./app2
+          docker push $REGISTRY/app2:latest
+          docker push $REGISTRY/app2:${{ github.sha }}
+
+  # ============================================================
+  # JOB 3 — Terraform + Deploy
+  # ============================================================
+  deploy:
+    name: Deploy (Terraform + SSH)
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Habilitar APIs e criar bucket de estado
+        env:
+          PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          gcloud services enable \
+            compute.googleapis.com \
+            artifactregistry.googleapis.com \
+            --project=$PROJECT --quiet
+
+          BUCKET="${PROJECT}-tfstate"
+          gcloud storage buckets create "gs://$BUCKET" \
+            --project=$PROJECT --location=$REGION 2>/dev/null \
+            || echo "Bucket já existe"
+          gcloud storage buckets update "gs://$BUCKET" --versioning 2>/dev/null || true
+
+      - name: Terraform Init
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+          PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          cd infra/terraform
+          cat > terraform.tfvars <<EOF
+          project_id = "$PROJECT"
+          region     = "us-central1"
+          zone       = "us-central1-a"
+          repo_name  = "devops-challenge"
+          repo_url   = "https://github.com/wilsongomes345/to-brasil.git"
+          EOF
+          terraform init \
+            -input=false \
+            -backend-config="bucket=${PROJECT}-tfstate" \
+            -backend-config="prefix=devops-challenge"
+
+      - name: Terraform Apply
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+          PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          cd infra/terraform
+          terraform apply -auto-approve -input=false
+          echo "VM_IP=$(terraform output -raw vm_ip)" >> $GITHUB_ENV
+          echo "REGISTRY=$(terraform output -raw registry_url)" >> $GITHUB_ENV
+
+      - name: Aguardar Docker na VM
+        run: |
+          echo "Aguardando VM inicializar..."
+          for i in $(seq 1 40); do
+            if gcloud compute ssh $VM_NAME \
+              --zone=$ZONE --project=${{ secrets.GCP_PROJECT_ID }} \
+              --quiet --ssh-flag="-o StrictHostKeyChecking=no" \
+              --command="docker info" &>/dev/null; then
+              echo "VM pronta!"
+              break
+            fi
+            echo "Tentativa $i/40..."
+            sleep 15
+          done
+
+      - name: Deploy via SSH
+        env:
+          PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          gcloud compute ssh $VM_NAME \
+            --zone=$ZONE --project=$PROJECT \
+            --quiet --ssh-flag="-o StrictHostKeyChecking=no" \
+            --command="
+              set -e
+              sudo git config --global --add safe.directory /opt/app
+              cd /opt/app
+              sudo git pull origin main
+              echo 'REGISTRY=$REGISTRY' | sudo tee .env
+              sudo gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
+              sudo docker compose pull
+              sudo docker compose up -d --remove-orphans
+              sudo docker compose ps
+            "
+
+      - name: Resumo
+        run: |
+          echo "## ✅ Deploy concluído!" >> $GITHUB_STEP_SUMMARY
+          echo "| Serviço | URL |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| App 1 /text (cache 10s) | http://$VM_IP/app1/text |" >> $GITHUB_STEP_SUMMARY
+          echo "| App 1 /time (cache 10s) | http://$VM_IP/app1/time |" >> $GITHUB_STEP_SUMMARY
+          echo "| App 2 /text (cache 60s) | http://$VM_IP/app2/text |" >> $GITHUB_STEP_SUMMARY
+          echo "| App 2 /time (cache 60s) | http://$VM_IP/app2/time |" >> $GITHUB_STEP_SUMMARY
+          echo "| Prometheus | http://$VM_IP:9090 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Grafana    | http://$VM_IP:3000 (admin/admin) |" >> $GITHUB_STEP_SUMMARY

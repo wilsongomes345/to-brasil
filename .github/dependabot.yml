@@ -43,3 +43,4 @@ updates:
     schedule:
       interval: "weekly"
     labels: ["dependencies", "terraform"]
+
