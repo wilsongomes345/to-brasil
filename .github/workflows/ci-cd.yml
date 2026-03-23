@@ -123,14 +123,14 @@ jobs:
             $REGISTRY/app2:latest
 
       - name: Publicar App 1 → GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: trivy-app1.sarif
           category: trivy-app1
 
       - name: Publicar App 2 → GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: trivy-app2.sarif
